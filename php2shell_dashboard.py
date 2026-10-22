@@ -183,11 +183,12 @@ def collect(dt, frm, running_minutes, techs):
         for dtype, label in wanted_types.items():
             hits = [t for t in techs_found if str(t.get("type", "")).upper() == dtype]
             if hits:
-                php.append((e, label, next((t.get("version") for t in hits if t.get("version")), "")))
+                php.append((e, label, next((t.get("version") for t in hits if t.get("version")), ""),
+                            dtype, next((t.get("edition") for t in hits if t.get("edition")), "")))
     print("  %d matching processes" % len(php))
 
     # Kubernetes context (namespace / cluster / workload) hangs off the container group instance
-    cgi_ids = sorted({r["id"] for e, _, _ in php for rels in (e.get("fromRelationships") or {}).values()
+    cgi_ids = sorted({r["id"] for e, _, _, _, _ in php for rels in (e.get("fromRelationships") or {}).values()
                       for r in rels if r.get("type") == "CONTAINER_GROUP_INSTANCE"})
     cgi_rels = {}
     for i in range(0, len(cgi_ids), 50):
@@ -209,7 +210,7 @@ def collect(dt, frm, running_minutes, techs):
 
     # Resolve related entity names (host, workload, namespace, cluster, process group)
     wanted = defaultdict(set)
-    for e, _, _ in php:
+    for e, _, _, _, _ in php:
         for t, ids in related(e).items():
             wanted[t].update(ids)
     names = {}
@@ -222,7 +223,7 @@ def collect(dt, frm, running_minutes, techs):
 
     now_ms = time.time() * 1000
     rows = []
-    for e, tech, ver in php:
+    for e, tech, ver, dtype, edition in php:
         rel = related(e)
 
         def first(t):
@@ -237,7 +238,7 @@ def collect(dt, frm, running_minutes, techs):
         running = (now_ms - last) <= running_minutes * 60000 if last else True
         rows.append({
             "id": e["entityId"], "name": e.get("displayName", ""),
-            "tech": tech, "status": classify("PHP" if tech == "PHP" else "NODE", ver),
+            "tech": tech, "tech_type": dtype, "edition": edition, "status": classify("PHP" if tech == "PHP" else "NODE", ver),
             "version": ver or "n/a", "scope": scope,
             "environment": ns if ns else first("HOST"),
             "cluster": cluster, "workload": workload or first("PROCESS_GROUP") or e.get("displayName", ""),
@@ -528,16 +529,23 @@ def build_dashboard(base, rows, total_scanned, args):
             "tiles": tiles}
 
 
+CSV_COLS = ["technology", "version", "status", "process", "host", "listen_ports", "pgi_id", "pg_id", "host_id", "edition"]
+CSV_STATUS = {EOL: "EOL-AFFECTED"}  # CSV uses EOL-AFFECTED where the dashboard says VULNERABLE_EOL
+
+
 def write_csv(path, rows):
+    """One row per process and technology: technology, version, status, process, host, listen_ports, ids, edition."""
+    out = [{"technology": r["tech_type"], "version": "" if r["version"] == "n/a" else r["version"],
+            "status": CSV_STATUS.get(r["status"], r["status"]), "process": r["name"], "host": r["host"],
+            "listen_ports": r["ports"], "pgi_id": r["id"], "pg_id": r["pg_id"], "host_id": r["host_id"],
+            "edition": r["edition"]} for r in rows]
+    out.sort(key=lambda r: (r["technology"], r["status"], r["version"], r["host"]))
     with open(path, "w", newline="", encoding="utf-8") as f:
-        cols = ["tech", "status", "version", "ports", "scope", "environment", "cluster", "workload", "host", "name", "id",
-                "pg_id", "host_id", "image", "state"]
-        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=CSV_COLS)
         w.writeheader()
-        w.writerows(sorted(rows, key=lambda r: (r["status"], r["environment"], r["name"])))
+        w.writerows(out)
 
 
-# --------------------------------------------------------------------------- #
 def main():
     p = argparse.ArgumentParser(description="Create a classic Dynatrace dashboard of processes exposed to the "
                                             "PHP2Shell and Node.js Oct-2026 vulnerabilities.")
@@ -555,7 +563,8 @@ def main():
     p.add_argument("--owner", default=None, help="dashboard owner (default php2shell-script)")
     p.add_argument("--shared", action="store_true", help="share the dashboard with all users")
     p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
-    p.add_argument("--csv", "--out", metavar="FILE", help="also write all processes to a CSV file")
+    p.add_argument("--csv", "--out", metavar="FILE", default="php2shell_exposure.csv",
+                   help="CSV with every process (default php2shell_exposure.csv)")
     p.add_argument("--dry-run", metavar="FILE", help="do not touch the tenant's dashboards; write dashboard JSON to FILE")
     p.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed Managed certificate)")
     p.add_argument("--ca-bundle", help="PEM file with your Managed CA certificate")
@@ -578,9 +587,8 @@ def main():
     dt = DT(base, args.token, verify=not args.insecure, ca_bundle=args.ca_bundle)
 
     total, rows = collect(dt, args.frm, args.running_minutes, args.techs)
-    if args.csv:
-        write_csv(args.csv, rows)
-        print("CSV written: " + args.csv)
+    write_csv(args.csv, rows)
+    print("CSV written: " + args.csv)
     dash = build_dashboard(base, rows, total, args)
 
     print()

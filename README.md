@@ -159,7 +159,7 @@ Running it again with the same dashboard name **updates the dashboard in place**
 | `--tech php` / `--tech node` | Check only one technology (default `php,node`, both) |
 | `--from now-7d` | Timeframe for processes (default `now-24h`; alias `--timeframe`). A process counts if it existed in that timeframe |
 | `--running-only` | Only count processes seen in the last 15 minutes (`--running-minutes N` to change) |
-| `--csv file.csv` | Also export every process (all statuses) to CSV (alias `--out`) |
+| `--csv file.csv` | CSV with every process, all statuses (default `php2shell_exposure.csv`, alias `--out`). Written on every run, including `--dry-run` |
 | `--dry-run out.json` | Do not create anything in Dynatrace; write the dashboard JSON to a file |
 | `--name "My name"` | Dashboard name (also the key used for update-in-place) |
 | `--shared` | Share the dashboard with all users (default: private to the token owner) |
@@ -175,6 +175,24 @@ Run with `--dry-run` (only `entities.read` needed), then import the JSON in the 
 ```bash
 python3 php2shell_dashboard.py --dry-run php2shell-dashboard.json --csv php2shell.csv
 ```
+
+### CSV output
+
+Every run writes a CSV (default `php2shell_exposure.csv` in the current folder), one row per process and technology:
+
+| Column | Content |
+|---|---|
+| `technology` | `PHP` or `NODE_JS` |
+| `version` | Version OneAgent detected (empty if unreadable) |
+| `status` | `VULNERABLE`, `EOL-AFFECTED` (end-of-life line, no fix), `PATCHED` or `UNKNOWN` |
+| `process` | Process name |
+| `host` | Host the process runs on |
+| `listen_ports` | Listening ports |
+| `pgi_id`, `pg_id`, `host_id` | Dynatrace entity IDs of the process instance, process group and host |
+| `edition` | Software edition reported by OneAgent (for example `CLI` for PHP) |
+
+Sorted by technology, status, version and host. The CSV always has every process; the dashboard lists are capped.
+Note the CSV calls end-of-life findings `EOL-AFFECTED`, while the dashboard shows them as `VULNERABLE_EOL`.
 
 ## 5. Troubleshooting
 
