@@ -577,7 +577,7 @@ def _dedupe(items):
 def version_buckets(tech, seen):
     """Version strings per status bucket. The entity selector matches exact versions, so each bucket is enumerated:
     every patch release in the range that matters, plus every version actually found by the scan."""
-    b = {"vulnerable": [], "patched": [], "eol_backport": [], "eol_nofix": []}
+    b = {"vulnerable": [], "patched": [], "eol_backport": [], "eol_nofix": [], "eol_seen": []}
     if tech == "PHP":
         for (ma, mi), fx in PHP_FIXED.items():
             b["vulnerable"] += ["%d.%d.%d" % (ma, mi, p) for p in range(0, fx[2])]
@@ -602,7 +602,7 @@ def version_buckets(tech, seen):
             continue
         name = {VULN: "vulnerable", PATCHED: "patched"}.get(r["status"])
         if name is None and r["status"] == EOL:
-            name = ("eol_backport" if v[:2] >= (8, 0) else "eol_nofix") if tech == "PHP" else None
+            name = ("eol_backport" if v[:2] >= (8, 0) else "eol_nofix") if tech == "PHP" else "eol_seen"
         if name:
             b[name].append(r["version"])
     return {k: _dedupe(v) for k, v in b.items()}
@@ -615,6 +615,14 @@ def _in(entity_selector):
 def _versions_in(dtype, versions):
     return [_in('type(process_group_instance),softwareTechnologies.version(%s)'
                 % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk))
+            for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
+
+
+def _hosts_running(dtype, versions):
+    """Hosts that run at least one process with one of these versions."""
+    return [('in("dt.entity.host",entitySelector("type(host),toRelationships.isProcessOf('
+             'type(process_group_instance),softwareTechnologies.version(%s))"))')
+            % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk)
             for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
 
 
@@ -661,10 +669,11 @@ def build_dashboard_native(base, rows, total_scanned, args):
 
     patched_rule = [(1, GREEN), (0, YELLOW), (None, FALLBACK)]  # nothing patched yet shows yellow
 
-    def visual(kind, colors, thresholds=None):
+    def visual(kind, colors, thresholds=None, aliases=None):
         v = {"type": kind, "global": {},
                 "rules": [dict(matcher="%s:" % "AB"[i], properties=dict(
-                    color=c, alias=SERIES_NAMES[i] if kind == "GRAPH_CHART" else VALUE_NAME, **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
+                    color=c, **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {}),
+                    **({} if aliases == [] else {"alias": (aliases or SERIES_NAMES)[i] if kind == "GRAPH_CHART" else VALUE_NAME})),
                     seriesOverrides=[]) for i, c in enumerate(colors)],
                 "axes": {"xAxis": {"visible": True}, "yAxes": []}, "heatmapSettings": {"yAxis": "VALUE"},
                 "thresholds": [], "tableSettings": {"isThresholdBackgroundAppliedToCell": False,
@@ -678,17 +687,17 @@ def build_dashboard_native(base, rows, total_scanned, args):
             v["singleValueSettings"] = {"showTrend": False, "showSparkLine": False, "linkTileColorToThreshold": True}
         return v
 
-    def explorer(name, selectors, kind, colors, top, left, width, height, thresholds=None):
+    def explorer(name, selectors, kind, colors, top, left, width, height, thresholds=None, aliases=None):
         qs = [{"id": "AB"[i], "spaceAggregation": "AUTO", "timeAggregation": "DEFAULT", "metricSelector": sel,
                "rate": "NONE", "enabled": True, "histogram": False} for i, sel in enumerate(selectors)]
         if kind == "TABLE":
             exprs = ["resolution=null&(%s):names:fold(auto)" % selectors[0]]
-        elif len(selectors) > 1:
+        elif len(selectors) > 1 or kind == "GRAPH_CHART":
             exprs = ["resolution=null&" + ",".join("(%s):limit(100):names" % x for x in selectors)]
         else:
             exprs = ["resolution=Inf&(%s):limit(100):names" % selectors[0], "resolution=null&(%s)" % selectors[0]]
         add("DATA_EXPLORER", name, top, left, width, height, isAutoRefreshDisabled=False, customName=name,
-            queries=qs, visualConfig=visual(kind, colors, thresholds), queriesSettings={"resolution": ""}, metricExpressions=exprs)
+            queries=qs, visualConfig=visual(kind, colors, thresholds, aliases), queriesSettings={"resolution": ""}, metricExpressions=exprs)
 
     # ---- header + CVE section
     top = header("%s exposure  |  live from OneAgent process technology data" % " & ".join(used), 0)
@@ -716,6 +725,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
 
     # ---- per technology: KPI row + trend
     sels = {}
+    exposed_versions = {}
     for tech in used:
         dtype = dtypes[tech]
         b = version_buckets(tech, rows)
@@ -730,6 +740,11 @@ def build_dashboard_native(base, rows, total_scanned, args):
         else:  # every other line (<= 21, 23, 25) is end of life: all Node.js that is in no fixed line
             f["eol"] = "and(%s,not(%s))" % (allp, _or(vuln + pat))
         sels[tech] = f
+        # Host filter, kept short: PHP enumerates every vulnerable patch release; everything else uses the
+        # exposed versions the scan actually found (a full enumeration would make the query too long).
+        seen_exposed = _dedupe([r["version"] for r in rows
+                                if r["tech"] == tech and r["status"] in (VULN, EOL) and parse_version(r["version"])])
+        exposed_versions[tech] = (dtype, _dedupe((b["vulnerable"] if tech == "PHP" else []) + seen_exposed))
 
         top = header("%s  |  %s" % (tech, "PHP2Shell CVE-2026-109618 / CVE-2026-109619" if tech == "PHP"
                                     else "Node.js October 2026 security releases"), top)
@@ -753,6 +768,16 @@ def build_dashboard_native(base, rows, total_scanned, args):
         explorer("All %s vs patched over time" % tech, [_metric(f["all"], "count"), _metric(f["patched"], "count")],
                  "GRAPH_CHART", ["BLUE", "GREEN"], top, 0, W, 190)
         top += 190
+
+    # ---- network: packets received by the hosts that run a vulnerable runtime
+    host_parts = [x for t in used for x in _hosts_running(*exposed_versions[t]) if exposed_versions[t][1]]
+    if host_parts:
+        top = header("NETWORK  |  traffic on hosts that run a vulnerable or end-of-life %s" % " / ".join(used), top)
+        packets = ('builtin:host.net.nic.packets.rx:filter(%s):splitBy("dt.entity.host"):sum'
+                   ':sort(value(sum,descending)):limit(10)' % _or(host_parts))
+        explorer("Packets received: top 10 hosts running vulnerable %s" % " / ".join(used), [packets], "GRAPH_CHART",
+                 ["BLUE"], top, 0, W, 266, aliases=[])
+        top += 266
 
     # ---- process tables
     if args.process_tables:

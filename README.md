@@ -252,6 +252,7 @@ dashboard timeframe. The **Host group / Host** filters at the top narrow the vie
 - **CVE section** (top): the PHP2Shell CVEs and all ten Node.js CVEs with severity and fixed versions, plus a color guide
 - **Per technology**: single-value tiles (all, patched in green, vulnerable in red, end-of-life in orange) and an
   "all vs patched over time" trend graph
+- **Network**: packets received by the top 10 hosts that run a vulnerable or end-of-life runtime, to spot traffic spikes
 - **Remediation tables**: one row per process (process link and host) for vulnerable and end-of-life processes,
   including hosts without a host group, plus every PHP / Node.js process. Leave the tables out with `--no-process-tables`
 - **Gaps**: what the dashboard cannot see (no OneAgent, unfingerprinted runtimes)
@@ -270,5 +271,7 @@ sample. Static: re-run to refresh.
 - The native layout needs the viewing user to have access to process metrics; creating the dashboard needs only the
   token scopes above. It adds no data to the environment (no custom metrics).
 - Version lists are enumerated (entity selector limit); re-run the script after new releases or new versions appear.
+- The packets-received tile filters hosts by the exposed versions the script found when it ran (plus every vulnerable
+  PHP patch release), to keep the query short: re-run the script to pick up hosts that start running a new exposed version.
 - The markdown layout is a snapshot and does not render tables (markdown tiles hold at most 1000 characters).
 - Kubernetes vs Compute is decided by whether the process belongs to a Kubernetes namespace (CSV and markdown layout).
