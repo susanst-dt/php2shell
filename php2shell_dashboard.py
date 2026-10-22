@@ -59,6 +59,19 @@ DASHBOARD_NAME = "PHP2Shell & Node.js Oct-2026 - exposure"
 PHP_FIXED = {(8, 5): (8, 5, 12), (8, 4): (8, 4, 27), (8, 3): (8, 3, 36), (8, 2): (8, 2, 35)}
 PHP_EOL_MAX = (8, 1)  # branches <= 8.1 are end of life, no fix
 NODE_FIXED = {22: (22, 23, 4), 24: (24, 22, 1), 26: (26, 12, 1)}  # major -> first fixed
+# Node.js October 2026 security releases (https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+NODE_CVES = [
+    ("CVE-2026-111497", "High", "Brotli decoder out-of-bounds write, remote code execution"),
+    ("CVE-2026-105482", "High", "dns.resolve truncates names containing a NUL character"),
+    ("CVE-2026-105483", "High", "TLS hostname check bypass with fullwidth-digit IP"),
+    ("CVE-2026-106069", "High", "TLS hostname check bypass with loosely resolved IP"),
+    ("CVE-2026-105481", "Medium", "keep-alive sockets process a response written before the request"),
+    ("CVE-2026-106072", "Medium", "non-canonical IPv4 hostnames let DNS SANs authenticate IP endpoints"),
+    ("CVE-2026-106074", "Medium", "randomUUID()/randomInt() entropy cache saved in snapshots and SEAs"),
+    ("CVE-2026-106070", "Low", "ZipFile returns attacker-controlled bytes after failed validation (26.x)"),
+    ("CVE-2026-106071", "Low", "Permission Model filesystem over-grant via wildcard lookup (26.x)"),
+    ("CVE-2026-106073", "Low", "Permission Model bypass with fs.realpathSync"),
+]
 TECHS = {"php": ("PHP", "PHP"), "node": ("NODE_JS", "Node.js")}  # option -> (Dynatrace type, label)
 
 VULN, EOL, PATCHED, UNKNOWN = "VULNERABLE", "VULNERABLE_EOL", "PATCHED", "UNKNOWN"
@@ -343,7 +356,34 @@ def build_dashboard(base, rows, total_scanned, args):
         return top
 
     # ------------------------------------------------------------------ executive
-    top = header("EXECUTIVE SUMMARY   |   %s   |   snapshot %s" % (" + ".join(used), stamp), 0)
+    cve_tiles = []
+    if "PHP" in used:
+        cve_tiles.append(("PHP2Shell - CVE-2026-109618 / CVE-2026-109619",
+                          "**PHP2Shell**\n\n**CVE-2026-109618**\n\n**CVE-2026-109619**\n\n"
+                          "CVSS 4.0 **9.2 Critical**: unauthenticated remote code execution in the PHP core. "
+                          "Disclosed 2026-10-21.\n\nFixed in **8.5.12 \u00B7 8.4.27 \u00B7 8.3.36 \u00B7 8.2.35**. "
+                          "8.1 and older are EOL, no fix.\n\n"
+                          "[php.net advisory](https://www.php.net/archive/2026.php#2026-10-21-1)", 380))
+    if "Node.js" in used:
+        def cve_line(c):
+            return "* **%s** %s: %s" % c
+        half = (len(NODE_CVES) + 1) // 2
+        head = ("**Node.js Oct-2026 security releases** (10 CVEs), fixed in **22.23.4 \u00B7 24.22.1 \u00B7 26.12.1**. "
+                "[Advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)\n\n")
+        cve_tiles.append(("Node.js CVEs (1/2)", head + "\n".join(cve_line(c) for c in NODE_CVES[:half]), 570))
+        cve_tiles.append(("Node.js CVEs (2/2)", "\n".join(cve_line(c) for c in NODE_CVES[half:]), 570))
+    scale = W / float(sum(w for _, _, w in cve_tiles))
+    widths = [int(round(w * scale / 38.0)) * 38 for _, _, w in cve_tiles]
+    widths[-1] = W - sum(widths[:-1])
+    ch = max(est_height(t.split("\n"), w) for (_, t, _), w in zip(cve_tiles, widths))
+    top = header("CVES BEING CHECKED   |   a process is flagged when its runtime version is below the release that fixes them", 0)
+    left = 0
+    for (name, text, _), w in zip(cve_tiles, widths):
+        md(name, text, top, left, w, ch)
+        left += w
+    top += ch
+
+    top = header("EXECUTIVE SUMMARY   |   %s   |   snapshot %s" % (" + ".join(used), stamp), top)
 
     md("Legend - how to read the colors",
        "**Status:** \U0001F534 **VULNERABLE** supported version without the fix \u00B7 "
@@ -471,16 +511,9 @@ def build_dashboard(base, rows, total_scanned, args):
                   for r in unknown[:args.max_rows]]
         top = cards("Unreadable versions - check manually", ulines, top)
 
-    about = []
-    if "PHP" in used:
-        about.append("**PHP** CVE-2026-109618/109619: fixed in 8.5.12 · 8.4.27 · 8.3.36 · 8.2.35; 8.1 and older are EOL "
-                     "([php.net](https://www.php.net/archive/2026.php#2026-10-21-1)).")
-    if "Node.js" in used:
-        about.append("**Node.js** Oct-2026 releases: fixed in 22.23.4 · 24.22.1 · 26.12.1; other lines are EOL "
-                     "([nodejs.org](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)).")
     top = header("ABOUT THIS DASHBOARD", top)
     md("Method and caveats",
-       "\n\n".join(about) + "\n\n**Status** comes from the version OneAgent detected: VULNERABLE (fix not applied), "
+       "**Status** comes from the version OneAgent detected: VULNERABLE (fix not applied), "
        "VULNERABLE_EOL (end-of-life line), PATCHED, UNKNOWN. **Version-only:** distro vendors may backport fixes "
        "without changing the version, verify with `rpm -q` / `dpkg -l`. Timeframe `%s`%s. "
        "Re-run the script to refresh this snapshot."

@@ -14,10 +14,31 @@ Works on Dynatrace Managed and on SaaS (via the classic API).
 
 ## CVEs this checks for
 
-| Technology | CVEs | Notes |
-|---|---|---|
-| PHP | **CVE-2026-109618**, **CVE-2026-109619** ("PHP2Shell") | CVSS 4.0: 9.2 critical. Unauthenticated remote code execution in the PHP core. Disclosed 2026-10-21 |
-| Node.js | October 2026 security releases (**ten CVEs**), including **CVE-2026-111497** | CVE-2026-111497 is the Brotli decoder RCE and the most severe. The full CVE list is in the [Node.js advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) |
+The same list is shown at the top of the generated dashboard.
+
+**PHP ("PHP2Shell")**: CVSS 4.0 9.2 critical, unauthenticated remote code execution in the PHP core, disclosed 2026-10-21.
+
+| CVE |
+|---|
+| CVE-2026-109618 |
+| CVE-2026-109619 |
+
+**Node.js October 2026 security releases** ([advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)):
+
+| CVE | Severity | Description | Lines affected |
+|---|---|---|---|
+| CVE-2026-111497 | High | Brotli decoder out-of-bounds write, remote code execution | 22, 24, 26 |
+| CVE-2026-105482 | High | `dns.resolve` truncates names containing a NUL character | 22, 24, 26 |
+| CVE-2026-105483 | High | TLS hostname check bypass with fullwidth-digit IP | 24, 26 |
+| CVE-2026-106069 | High | TLS hostname check bypass with loosely resolved IP | 22, 24, 26 |
+| CVE-2026-105481 | Medium | Keep-alive sockets process a response written before the request | 22, 24, 26 |
+| CVE-2026-106072 | Medium | Non-canonical IPv4 hostnames let DNS SANs authenticate IP endpoints | 22, 24, 26 |
+| CVE-2026-106074 | Medium | `randomUUID()` / `randomInt()` entropy cache saved in startup snapshots and SEAs | 22, 24, 26 |
+| CVE-2026-106070 | Low | `ZipFile` returns attacker-controlled bytes after failed header validation | 26 |
+| CVE-2026-106071 | Low | Permission Model filesystem over-grant via wildcard lookup | 26 |
+| CVE-2026-106073 | Low | Permission Model bypass with `fs.realpathSync` | 22, 24, 26 |
+
+The advisory lists affected lines per CVE; confirm details in the individual release notes.
 
 The script does not test for individual CVEs. It flags any process whose runtime version is below the release that
 fixes them (see the fixed-version table above), so one version check covers every CVE in that release.
@@ -187,7 +208,9 @@ which is correct: it is still exposed.
 
 ## 7. Dashboard contents
 
-**Executive summary** (top of the dashboard)
+**CVE information** (very top): the PHP2Shell CVEs and all ten Node.js CVEs with severity, plus the fixed versions
+
+**Executive summary**
 - Verdict tile: "N of M processes exposed", how many workloads/hosts and environments, and a call-out when PHP2Shell
   (critical) or end-of-life processes are present
 - Exposure by technology and by scope (Kubernetes / Compute) as bars
