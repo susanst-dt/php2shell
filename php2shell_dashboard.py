@@ -149,6 +149,23 @@ class DT:
                 raise SystemExit("Cannot reach %s: %s\n(self-signed Managed cert? try --insecure "
                                  "or --ca-bundle file.pem)" % (self.base, e.reason))
 
+    def token_owner(self):
+        """Owner (Dynatrace user) of the API token = whoever runs the script. None if it cannot be determined."""
+        try:
+            return self.call("POST", "/api/v2/apiTokens/lookup", body={"token": self.token}).get("owner") or None
+        except SystemExit:
+            return None
+
+    def share_with_all_as_editors(self, dashboard_id):
+        """Everyone in the environment can view AND edit the dashboard. Returns True on success."""
+        try:
+            self.call("PUT", "/api/config/v1/dashboards/%s/shareSettings" % dashboard_id,
+                      body={"id": dashboard_id, "enabled": True, "permissions": [{"type": "ALL", "permission": "EDIT"}]})
+            return True
+        except SystemExit as e:
+            print("Warning: could not share the dashboard with all users as editors: %s" % str(e).splitlines()[0])
+            return False
+
     def entities(self, selector, fields, frm, page_size=500):
         params = {"entitySelector": selector, "fields": fields, "pageSize": page_size, "from": frm}
         out = []
@@ -528,7 +545,7 @@ def build_dashboard_markdown(base, rows, total_scanned, args):
        % (args.frm, ", running only" if args.running_only else ""),
        top, 0, W, 190)
 
-    return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner or "php2shell-script",
+    return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner,
                                   "dashboardFilter": {"timeframe": "-2h"}, "hasConsistentColors": False},
             "tiles": tiles}
 
@@ -537,6 +554,8 @@ def build_dashboard_markdown(base, rows, total_scanned, args):
 # Native layout: live Data explorer tiles (single values, trend graphs, process tables)
 # --------------------------------------------------------------------------- #
 PGI_DIM = "dt.entity.process_group_instance"
+VALUE_NAME = "Processes"        # series name shown for single values and tables; threshold rules refer to it
+SERIES_NAMES = ["All processes", "Patched"]  # trend graph legend
 MAX_VERSIONS_PER_PREDICATE = 50  # Dynatrace entity selector limit for softwareTechnologies.version
 NODE_PATCH_RANGE = 6             # enumerate Node.js patch numbers 0..5 (plus every version actually seen)
 
@@ -607,7 +626,8 @@ def _metric(filter_expr, kind):
     base = "builtin:pgi.availability.state:filter(%s)" % filter_expr
     if kind == "count":
         return base + ":splitBy():count"
-    return base + ':last:splitBy("%s","dt.entity.host","dt.host_group.id"):sort(value(auto,descending))' % PGI_DIM
+    # Do not split by dt.host_group.id: series without a host group would silently drop out of the table.
+    return base + ':last:splitBy("%s","dt.entity.host"):sort(value(auto,descending))' % PGI_DIM
 
 
 def build_dashboard_native(base, rows, total_scanned, args):
@@ -629,26 +649,32 @@ def build_dashboard_native(base, rows, total_scanned, args):
         add("HEADER", text, top, 0, W, 38, isAutoRefreshDisabled=False)
         return top + 38
 
-    palette = {"RED": "#c4233b", "GREEN": "#2ab06f", "ORANGE": "#fd8232", "BLUE": "#1496ff"}
+    # Threshold colors. Dynatrace stores rules from the highest value down: a tile gets the color of the first rule
+    # whose value is <= the count, and the last rule (no value) is the fallback.
+    BLUE, GREEN, YELLOW, RED, ORANGE, FALLBACK = "#1496ff", "#2ab06f", "#f5d30f", "#c4233b", "#fd8232", "#dc172a"
 
-    def alert(color):  # colored when at least one process matches, green when none
-        return [(">=", 1, palette[color]), ("<", 1, palette["GREEN"])]
+    def alert(color):  # any process at all (>= 1) is bad, none (0) is good
+        return [(1, color), (0, GREEN), (None, FALLBACK)]
 
-    def fixed(color):
-        return [(">=", 0, palette[color])]
+    def solid(color):
+        return [(0, color)]
+
+    patched_rule = [(1, GREEN), (0, YELLOW), (None, FALLBACK)]  # nothing patched yet shows yellow
 
     def visual(kind, colors, thresholds=None):
         v = {"type": kind, "global": {},
                 "rules": [dict(matcher="%s:" % "AB"[i], properties=dict(
-                    color=c, alias="Process State", **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
+                    color=c, alias=SERIES_NAMES[i] if kind == "GRAPH_CHART" else VALUE_NAME, **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
                     seriesOverrides=[]) for i, c in enumerate(colors)],
                 "axes": {"xAxis": {"visible": True}, "yAxes": []}, "heatmapSettings": {"yAxis": "VALUE"},
-                "thresholds": [], "tableSettings": {"isThresholdBackgroundAppliedToCell": False, "hiddenColumns": []},
+                "thresholds": [], "tableSettings": {"isThresholdBackgroundAppliedToCell": False,
+                                                    "hiddenColumns": []},
                 "graphChartSettings": {"connectNulls": False},
                 "honeycombSettings": {"showHive": True, "showLegend": True, "showLabels": False}}
         if thresholds:  # color the whole single-value tile, not just the sparkline
-            v["thresholds"] = [{"axisTarget": "LEFT", "columnId": "Process State", "queryId": "A", "visible": True,
-                                "rules": [{"color": c, "comparator": cmp_, "value": val} for cmp_, val, c in thresholds]}]
+            v["thresholds"] = [{"axisTarget": "LEFT", "columnId": VALUE_NAME, "queryId": "A", "visible": True,
+                                "rules": [{"value": val, "color": c} if val is not None else {"color": c}
+                                          for val, c in thresholds]}]
             v["singleValueSettings"] = {"showTrend": False, "showSparkLine": False, "linkTileColorToThreshold": True}
         return v
 
@@ -678,9 +704,9 @@ def build_dashboard_native(base, rows, total_scanned, args):
     top += ch
     md("How to read this dashboard",
        "Tiles are **live metric queries** filtered by the version OneAgent detected on each process "
-       "(`softwareTechnologies.version`). **Colors:** \U0001F535 blue = all processes · \U0001F7E2 green = patched "
-       "(fixed release or newer) · \U0001F534 red = vulnerable, or end-of-life with no fix (tile turns green at 0) · "
-       "\U0001F7E0 orange = end-of-life, community backports or migration only. All = patched + vulnerable + EOL "
+       "(`softwareTechnologies.version`). **Colors:** \U0001F535 blue = all processes · \U0001F7E2 green = patched, or no vulnerable processes left (0) · "
+       "\U0001F7E1 yellow = nothing patched yet · \U0001F534 red = vulnerable processes still running, or end-of-life with no fix · "
+       "\U0001F7E0 orange = end-of-life, community backport or migration only. All = patched + vulnerable + EOL "
        "(+ any version the dashboard does not know). "
        "**Version-only:** distro vendors may backport a fix without bumping the version, so confirm with "
        "`rpm -q` / `dpkg -l` before closing a finding. A process upgraded on disk but not restarted still shows the "
@@ -708,16 +734,16 @@ def build_dashboard_native(base, rows, total_scanned, args):
         top = header("%s  |  %s" % (tech, "PHP2Shell CVE-2026-109618 / CVE-2026-109619" if tech == "PHP"
                                     else "Node.js October 2026 security releases"), top)
         if tech == "PHP":
-            kpis = [("All PHP processes", f["all"], "BLUE", fixed("BLUE")),
-                    ("Patched (fixed release or newer)", f["patched"], "GREEN", fixed("GREEN")),
-                    ("Vulnerable, patch available (8.2–8.5)", f["vuln"], "RED", alert("RED")),
-                    ("EOL 8.0 / 8.1 (backport only)", f["eol_backport"], "ORANGE", alert("ORANGE")),
-                    ("EOL 7.x / 5.x (no fix)", f["eol_nofix"], "RED", alert("RED"))]
+            kpis = [("All PHP processes", f["all"], "BLUE", solid(BLUE)),
+                    ("Patched (fixed release or newer)", f["patched"], "GREEN", patched_rule),
+                    ("Vulnerable, patch available (8.2–8.5)", f["vuln"], "RED", alert(RED)),
+                    ("EOL 8.0 / 8.1 (backport only)", f["eol_backport"], "RED", alert(ORANGE)),
+                    ("EOL 7.x / 5.x (no fix)", f["eol_nofix"], "RED", alert(RED))]
         else:
-            kpis = [("All Node.js processes", f["all"], "BLUE", fixed("BLUE")),
-                    ("Patched (22.23.4 / 24.22.1 / 26.12.1 or newer)", f["patched"], "GREEN", fixed("GREEN")),
-                    ("Vulnerable, patch available (22 / 24 / 26)", f["vuln"], "RED", alert("RED")),
-                    ("EOL lines (no fix)", f["eol"], "ORANGE", alert("ORANGE"))]
+            kpis = [("All Node.js processes", f["all"], "BLUE", solid(BLUE)),
+                    ("Patched (22.23.4 / 24.22.1 / 26.12.1 or newer)", f["patched"], "GREEN", patched_rule),
+                    ("Vulnerable, patch available (22 / 24 / 26)", f["vuln"], "RED", alert(RED)),
+                    ("EOL lines (no fix)", f["eol"], "RED", alert("#ef651f"))]
         kw = W // len(kpis)
         kw = kw - kw % 38
         for i, (name, flt, color, thr) in enumerate(kpis):
@@ -728,25 +754,26 @@ def build_dashboard_native(base, rows, total_scanned, args):
                  "GRAPH_CHART", ["BLUE", "GREEN"], top, 0, W, 190)
         top += 190
 
-    # ---- remediation tables
-    top = header("REMEDIATION  |  one row per process, click through to the process page", top)
-    for tech in used:
-        f = sels[tech]
-        if tech == "PHP":
-            left_t = ("PHP vulnerable, patch available: upgrade to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35", f["vuln"])
-            right_t = ("PHP EOL (8.1 and older): community backport or migrate", f["eol"])
-        else:
-            left_t = ("Node.js vulnerable, patch available: upgrade to 22.23.4 / 24.22.1 / 26.12.1", f["vuln"])
-            right_t = ("Node.js EOL lines: migrate to a fixed line (22 / 24 / 26)", f["eol"])
-        for i, (name, flt) in enumerate((left_t, right_t)):
-            explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, i * (W // 2), W // 2, 342)
-        top += 342
+    # ---- process tables
+    if args.process_tables:
+        top = header("REMEDIATION  |  one row per process, click through to the process page", top)
+        for tech in used:
+            f = sels[tech]
+            if tech == "PHP":
+                left_t = ("PHP vulnerable, patch available: upgrade to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35", f["vuln"])
+                right_t = ("PHP EOL (8.1 and older): community backport or migrate", f["eol"])
+            else:
+                left_t = ("Node.js vulnerable, patch available: upgrade to 22.23.4 / 24.22.1 / 26.12.1", f["vuln"])
+                right_t = ("Node.js EOL lines: migrate to a fixed line (22 / 24 / 26)", f["eol"])
+            for i, (name, flt) in enumerate((left_t, right_t)):
+                explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, i * (W // 2), W // 2, 342)
+            top += 342
 
-    top = header("REFERENCE  |  every process OneAgent identified, any version", top)
-    for tech in used:
-        explorer("All %s processes (reference)" % tech, [_metric(sels[tech]["all"], "table")], "TABLE", ["DEFAULT"],
-                 top, 0, W, 342)
-        top += 342
+        top = header("REFERENCE  |  every process OneAgent identified, any version", top)
+        for tech in used:
+            explorer("All %s processes (reference)" % tech, [_metric(sels[tech]["all"], "table")], "TABLE", ["DEFAULT"],
+                     top, 0, W, 342)
+            top += 342
 
     top = header("WHAT THIS DASHBOARD CANNOT SEE", top)
     md("Gaps",
@@ -757,7 +784,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
        "Exploitation hunting (PHP workers spawning shells) needs exec telemetry such as Falco, Tetragon, auditd or Sysmon.",
        top, 0, W, 152)
 
-    return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner or "php2shell-script",
+    return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner,
                                   "dashboardFilter": {"timeframe": "-2h"}, "tags": ["security", "php2shell"],
                                   "dynamicFilters": {"filters": ["CUSTOM_DIMENSION:dt.host_group.id",
                                                                  "CUSTOM_DIMENSION:Host"], "genericTagFilters": []},
@@ -806,11 +833,17 @@ def main():
     p.add_argument("--running-only", action="store_true", help="only processes seen in the last --running-minutes")
     p.add_argument("--running-minutes", type=int, default=15)
     p.add_argument("--name", default=None, help="dashboard name (same name = updated in place)")
-    p.add_argument("--owner", default=None, help="dashboard owner (default php2shell-script)")
+    p.add_argument("--owner", default=os.environ.get("DT_DASHBOARD_OWNER"),
+                   help="Dynatrace user who owns (and can edit) the dashboard. Default: the owner of the API token, "
+                        "i.e. whoever runs the script (env DT_DASHBOARD_OWNER)")
+    p.add_argument("--editable-by-all", action="store_true",
+                   help="also let every user edit the dashboard (needs WriteConfig; automatic if the token owner is unknown)")
     p.add_argument("--shared", action="store_true", help="share the dashboard with all users")
     p.add_argument("--layout", choices=("native", "markdown"), default="native",
                    help="native = live Data explorer tiles like a hand-built dashboard (default); "
                         "markdown = static snapshot tiles")
+    p.add_argument("--no-process-tables", action="store_true",
+                   help="native layout: leave out the per-process tables (vulnerable, end-of-life, all)")
     p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
     p.add_argument("--csv", "--out", metavar="FILE", default="php2shell_exposure.csv",
                    help="CSV with every process (default php2shell_exposure.csv)")
@@ -818,6 +851,7 @@ def main():
     p.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed Managed certificate)")
     p.add_argument("--ca-bundle", help="PEM file with your Managed CA certificate")
     args = p.parse_args()
+    args.process_tables = not args.no_process_tables
 
     args.techs = [t.strip().lower() for t in args.tech.split(",") if t.strip()]
     if not args.techs or any(t not in TECHS for t in args.techs):
@@ -834,6 +868,19 @@ def main():
         sys.exit("URL and token are required.")
     base = normalize_base(args.url)
     dt = DT(base, args.token, verify=not args.insecure, ca_bundle=args.ca_bundle)
+
+    # Who may edit the dashboard: the user running the script (owner of the API token). If that cannot be
+    # determined, fall back to a dashboard that every user can view and edit.
+    args.edit_all = args.editable_by_all
+    if not args.owner:
+        args.owner = dt.token_owner()
+        if args.owner:
+            print("Dashboard owner (editable by): %s" % args.owner)
+        else:
+            args.edit_all = True
+            args.owner = "php2shell-script"
+            print("Could not determine the token owner: the dashboard will be shared so that all users can edit it.")
+    args.shared = args.shared or args.edit_all
 
     total, rows = collect(dt, args.frm, args.running_minutes, args.techs)
     write_csv(args.csv, rows)
@@ -855,6 +902,9 @@ def main():
         with open(args.dry_run, "w", encoding="utf-8") as f:
             json.dump(dash, f, indent=2)
         print("Dry run - dashboard JSON written: " + args.dry_run)
+        if args.edit_all:
+            print("Note: edit access for all users cannot be set through a JSON import. After importing, open Share "
+                  "on the dashboard and give everyone edit access, or run without --dry-run (needs WriteConfig).")
         return
 
     existing = [d for d in dt.call("GET", "/api/config/v1/dashboards").get("dashboards", []) if d.get("name") == args.name]
@@ -866,6 +916,8 @@ def main():
     else:
         did = dt.call("POST", "/api/config/v1/dashboards", body=dash)["id"]
         print("Dashboard created.")
+    if args.edit_all and dt.share_with_all_as_editors(did):
+        print("Shared with all users as editors.")
     print("Open: %s/#dashboard;id=%s" % (base, did))
 
 

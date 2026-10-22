@@ -156,6 +156,7 @@ Running it again with the same dashboard name **updates the dashboard in place**
 
 | Option | Purpose |
 |---|---|
+| `--no-process-tables` | Native layout: leave out the per-process tables |
 | `--layout native` / `--layout markdown` | `native` (default): live Data explorer tiles like a hand-built dashboard. `markdown`: static snapshot tiles with bar graphics and remediation lists |
 | `--tech php` / `--tech node` | Check only one technology (default `php,node`, both) |
 | `--from now-7d` | Timeframe for processes (default `now-24h`; alias `--timeframe`). A process counts if it existed in that timeframe |
@@ -163,10 +164,25 @@ Running it again with the same dashboard name **updates the dashboard in place**
 | `--csv file.csv` | CSV with every process, all statuses (default `php2shell_exposure.csv`, alias `--out`). Written on every run, including `--dry-run` |
 | `--dry-run out.json` | Do not create anything in Dynatrace; write the dashboard JSON to a file |
 | `--name "My name"` | Dashboard name (also the key used for update-in-place) |
-| `--shared` | Share the dashboard with all users (default: private to the token owner) |
+| `--owner user@company.com` | Dashboard owner (default: the owner of the API token, i.e. whoever runs the script) |
+| `--editable-by-all` | Let every user edit the dashboard (needs `WriteConfig`; automatic when the token owner is unknown) |
+| `--shared` | Share the dashboard with all users (view access) |
 | `--max-rows N` | Entries per list (default 20); CSV always has everything |
 | `--insecure` | Skip TLS verification (self-signed Managed certificate) |
 | `--ca-bundle ca.pem` | Trust your own CA certificate instead of using `--insecure` |
+
+### Who can edit the dashboard
+
+By default the dashboard is owned by **whoever runs the script**: the script looks up the owner of the API token and
+sets it as the dashboard owner, so the person who ran it can edit the dashboard (the same applies to a JSON exported
+with `--dry-run` and imported by that person). The owner and environment admins can always edit.
+
+- `--owner user@company.com` makes a different user the owner (env `DT_DASHBOARD_OWNER`).
+- If the token owner cannot be determined, the script falls back to a dashboard that **every user can view and edit**
+  (shared, with edit permission for all users).
+- `--editable-by-all` does the same on demand. Setting the share permissions needs `WriteConfig`, so it works when the
+  script creates or updates the dashboard, not with `--dry-run`: for a manual import use **Share** on the imported
+  dashboard to give everyone edit access.
 
 ### If the token cannot create dashboards
 
@@ -231,14 +247,13 @@ which is correct: it is still exposed.
 
 Built like a hand-made Dynatrace dashboard: every tile is a metric query (`builtin:pgi.availability.state`) filtered by the
 version OneAgent detected on each process (`softwareTechnologies.version`), so numbers and tables update with the
-dashboard timeframe and the **Host group / Host** filters at the top.
+dashboard timeframe. The **Host group / Host** filters at the top narrow the view; leave them empty to see everything, including hosts without a host group.
 
 - **CVE section** (top): the PHP2Shell CVEs and all ten Node.js CVEs with severity and fixed versions, plus a color guide
 - **Per technology**: single-value tiles (all, patched in green, vulnerable in red, end-of-life in orange) and an
   "all vs patched over time" trend graph
-- **Remediation**: one table row per process (process link, host, host group) for vulnerable and end-of-life processes,
-  with the version to upgrade to in the tile title
-- **Reference**: every PHP / Node.js process OneAgent identified
+- **Remediation tables**: one row per process (process link and host) for vulnerable and end-of-life processes,
+  including hosts without a host group, plus every PHP / Node.js process. Leave the tables out with `--no-process-tables`
 - **Gaps**: what the dashboard cannot see (no OneAgent, unfingerprinted runtimes)
 
 The entity selector matches exact version strings (at most 50 per condition), so the script enumerates every patch
