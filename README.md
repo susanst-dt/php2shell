@@ -1,0 +1,202 @@
+# PHP2Shell + Node.js Oct-2026 exposure dashboard (Dynatrace Managed, classic dashboard)
+
+Finds every PHP and Node.js process OneAgent monitors, classifies it against the fix releases of 21 Oct 2026
+(PHP2Shell CVE-2026-109618 / CVE-2026-109619, and the Node.js security releases) and creates a
+**classic dashboard** showing where the vulnerable runtimes are: hosts, Kubernetes namespaces/workloads and
+individual processes, with links into Dynatrace.
+
+| Technology | Fixed versions | Source |
+|---|---|---|
+| PHP | 8.5.12, 8.4.27, 8.3.36, 8.2.35 (8.1 and older: EOL, no fix) | https://www.php.net/archive/2026.php#2026-10-21-1 |
+| Node.js | 22.23.4, 24.22.1, 26.12.1 (other lines: EOL) | https://nodejs.org/en/blog/vulnerability/october-2026-security-releases |
+
+Works on Dynatrace Managed and on SaaS (via the classic API).
+
+---
+
+## 1. Requirements
+
+| Item | Requirement |
+|---|---|
+| Python | **3.7 or newer** (tested on 3.14). One of: `python3`, `python`, or on Windows `py -3` |
+| Dependencies | **None.** Standard library only: no `pip install`, no virtualenv |
+| OS | Windows, Linux, macOS (same single file) |
+| Network | The machine running the script must reach the Dynatrace URL over HTTPS (port 443, or your Managed port). It can run on a laptop, it does not need to run on a monitored host. Proxy settings from `HTTPS_PROXY` / `HTTP_PROXY` are honored |
+| Dynatrace | OneAgent monitoring the PHP hosts. Kubernetes namespace/workload names require Kubernetes monitoring |
+
+Check Python:
+
+```bash
+python3 --version
+```
+
+Windows (PowerShell / cmd):
+
+```
+py -3 --version
+```
+
+Install Python if missing: https://www.python.org/downloads/ (Windows: tick "Add python.exe to PATH"),
+or `brew install python` (macOS), or `apt install python3` / `dnf install python3` (Linux).
+
+## 2. API token and scopes
+
+Create the token in the Dynatrace UI: **Settings > Integration > Dynatrace API > Generate token**
+(Managed: same path inside the environment; the user needs permission to create API tokens).
+
+| Scope (UI name) | Scope ID | Needed for |
+|---|---|---|
+| Read entities | `entities.read` | Reading processes, hosts, namespaces, workloads (**always required**) |
+| Read configuration | `ReadConfig` | Finding an existing dashboard to update in place |
+| Write configuration | `WriteConfig` | Creating / updating the dashboard |
+
+Minimum for read-only use (`--dry-run`, CSV, or manual import): **`entities.read` only**.
+Full automatic dashboard creation: all three scopes.
+
+The script never modifies monitored entities, settings or tags. It only writes one dashboard.
+Treat the token as a secret: prefer the hidden prompt or an environment variable over typing it on the command line
+(command lines end up in shell history and process lists), and delete the token when finished.
+
+## 3. Environment URL
+
+| Deployment | `--url` value (alias `--base-url`) |
+|---|---|
+| Managed | `https://<managed-host>/e/<environment-id>` (the URL you use in the browser, without the `#...` part) |
+| Managed via an Environment ActiveGate | `https://<activegate-host>:9999/e/<environment-id>` |
+| SaaS | `https://<tenant-id>.live.dynatrace.com` |
+
+## 4. Run it
+
+Download `php2shell_dashboard.py` and open a terminal in its folder.
+
+### Interactive (recommended): the script prompts for URL and token (token input is hidden)
+
+Linux / macOS:
+```bash
+python3 php2shell_dashboard.py
+```
+
+Windows:
+```
+py -3 php2shell_dashboard.py
+```
+
+### With environment variables
+
+Linux / macOS:
+```bash
+export DT_URL='https://managed.example.com/e/<environment-id>'
+export DT_API_TOKEN='dt0c01.XXXX'   # DT_TOKEN also works
+python3 php2shell_dashboard.py
+```
+
+Windows PowerShell:
+```powershell
+$env:DT_URL = 'https://managed.example.com/e/<environment-id>'
+$env:DT_API_TOKEN = 'dt0c01.XXXX'
+py -3 php2shell_dashboard.py
+```
+
+Windows cmd:
+```
+set DT_URL=https://managed.example.com/e/<environment-id>
+set DT_API_TOKEN=dt0c01.XXXX
+py -3 php2shell_dashboard.py
+```
+
+### With arguments
+
+```bash
+python3 php2shell_dashboard.py --url https://managed.example.com/e/<environment-id> --token dt0c01.XXXX
+```
+
+On success the script prints the number of PHP processes found and a link to the dashboard:
+
+```
+PHP processes: 12 | vulnerable: 5 | unknown: 1
+Dashboard created.
+Open: https://managed.example.com/e/<environment-id>/#dashboard;id=...
+```
+
+Running it again with the same dashboard name **updates the dashboard in place**, so it can be scheduled
+(cron, systemd timer, Windows Task Scheduler) to keep the snapshot fresh.
+
+### Options
+
+| Option | Purpose |
+|---|---|
+| `--tech php` / `--tech node` | Check only one technology (default `php,node`, both) |
+| `--from now-7d` | Timeframe for processes (default `now-24h`; alias `--timeframe`). A process counts if it existed in that timeframe |
+| `--running-only` | Only count processes seen in the last 15 minutes (`--running-minutes N` to change) |
+| `--csv file.csv` | Also export every process (all statuses) to CSV (alias `--out`) |
+| `--dry-run out.json` | Do not create anything in Dynatrace; write the dashboard JSON to a file |
+| `--name "My name"` | Dashboard name (also the key used for update-in-place) |
+| `--shared` | Share the dashboard with all users (default: private to the token owner) |
+| `--max-rows N` | Entries per list (default 20); CSV always has everything |
+| `--insecure` | Skip TLS verification (self-signed Managed certificate) |
+| `--ca-bundle ca.pem` | Trust your own CA certificate instead of using `--insecure` |
+
+### If the token cannot create dashboards
+
+Run with `--dry-run` (only `entities.read` needed), then import the JSON in the UI:
+**Dashboards (classic) > Import dashboard** and select the file.
+
+```bash
+python3 php2shell_dashboard.py --dry-run php2shell-dashboard.json --csv php2shell.csv
+```
+
+## 5. Troubleshooting
+
+| Message | Cause / fix |
+|---|---|
+| `HTTP 401` | Token invalid, expired or copied incorrectly |
+| `HTTP 403 ... missing a required scope` | Add the scope named in the error (see table above) |
+| `HTTP 404` | Wrong URL. Managed needs `https://<host>/e/<environment-id>` |
+| `Cannot reach ...` / certificate error | Network/proxy problem, or self-signed cert: use `--ca-bundle` or `--insecure` |
+| `0 matching processes` | No PHP / Node.js monitored in the timeframe: widen with `--from now-7d`; check OneAgent is deployed on those hosts |
+| Everything shows as Compute | Kubernetes monitoring is not enabled, so processes have no namespace relationship |
+| Import error `Could not map JSON` | A markdown tile exceeded 1000 characters; use the current script version |
+
+## 6. How status is decided
+
+From the version OneAgent detects on each process (a process running both technologies appears once per technology):
+
+| Status | PHP | Node.js |
+|---|---|---|
+| VULNERABLE | 8.2 below 8.2.35, 8.3 below 8.3.36, 8.4 below 8.4.27, 8.5 below 8.5.12 | 22 below 22.23.4, 24 below 24.22.1, 26 below 26.12.1 |
+| VULNERABLE_EOL | branch 8.1 or older (no fix, migrate) | any other line (20, 23, 25 and older): EOL, upgrade to a fixed line |
+| PATCHED | at or above the fixed release (or a newer branch) | at or above the fixed release (or newer than 26) |
+| UNKNOWN | version not readable, check manually | same |
+
+The fixed versions are the `PHP_FIXED` / `NODE_FIXED` tables at the top of the script; edit them if advisories change.
+
+Caveats: the check is version-only. Distro vendors (Red Hat, Ubuntu, SUSE, Debian) may backport a fix without
+changing the version string; those processes show as VULNERABLE here, so confirm with `rpm -q` / `dpkg -l`
+before closing a finding. A process that was upgraded on disk but not restarted still shows the old version,
+which is correct: it is still exposed.
+
+## 7. Dashboard contents
+
+**Executive summary** (top of the dashboard)
+- Verdict tile: "N of M processes exposed", how many workloads/hosts and environments, and a call-out when PHP2Shell
+  (critical) or end-of-life processes are present
+- Exposure by technology and by scope (Kubernetes / Compute) as bars
+- 8 KPI tiles: vulnerable processes, workloads/hosts to fix, impacted environments, compliance, end-of-life,
+  unknown version, Kubernetes exposed, Compute exposed
+
+**Exposure breakdown:** by status, top versions in use, most exposed namespaces/hosts (bars)
+
+**Remediation plan** (for the people doing the work): one line per workload or host to fix, PHP first, showing
+environment, cluster, current version and the **version to upgrade to** (or "migrate" for end-of-life lines),
+with a link into Dynatrace
+
+**Process detail:** a sample of individual processes (full list in the CSV), unreadable versions, and a
+method/caveats tile
+
+## 8. Limits
+
+- Classic dashboards cannot run DQL, so this is a **snapshot** generated by the script (markdown tiles), not live
+  tiles. Re-run to refresh.
+- Markdown tiles hold at most 1000 characters and do not render tables, so detail data is shown as bar lists and
+  bullet lists split across several tiles. Lists are capped (`--max-rows`, default 20); the CSV export always has everything.
+- Kubernetes vs Compute is decided by whether the process belongs to a Kubernetes namespace.
