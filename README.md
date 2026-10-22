@@ -156,6 +156,7 @@ Running it again with the same dashboard name **updates the dashboard in place**
 
 | Option | Purpose |
 |---|---|
+| `--log-metric KEY` / `--no-log-tile` | Metric behind the PHP log-spike tile (default `dt.log.status_per_entity_count`) / leave the tile out |
 | `--no-process-tables` | Native layout: leave out the per-process tables |
 | `--layout native` / `--layout markdown` | `native` (default): live Data explorer tiles like a hand-built dashboard. `markdown`: static snapshot tiles with bar graphics and remediation lists |
 | `--tech php` / `--tech node` | Check only one technology (default `php,node`, both) |
@@ -252,7 +253,9 @@ dashboard timeframe. The **Host group / Host** filters at the top narrow the vie
 - **CVE section** (top): the PHP2Shell CVEs and all ten Node.js CVEs with severity and fixed versions, plus a color guide
 - **Per technology**: single-value tiles (all, patched in green, vulnerable in red, end-of-life in orange) and an
   "all vs patched over time" trend graph
-- **Network**: packets received by the top 10 hosts that run a vulnerable or end-of-life runtime, to spot traffic spikes
+- **Activity**: packets received and log volume per host (top 10 hosts that run a vulnerable or end-of-life
+  PHP / Node.js version), to spot traffic or logging spikes on exposed hosts. The log tile uses the metric
+  `dt.log.status_per_entity_count` (override with `--log-metric`, leave out with `--no-log-tile`)
 - **Remediation tables**: one row per process (process link and host) for vulnerable and end-of-life processes,
   including hosts without a host group, plus every PHP / Node.js process. Leave the tables out with `--no-process-tables`
 - **Gaps**: what the dashboard cannot see (no OneAgent, unfingerprinted runtimes)
@@ -271,7 +274,10 @@ sample. Static: re-run to refresh.
 - The native layout needs the viewing user to have access to process metrics; creating the dashboard needs only the
   token scopes above. It adds no data to the environment (no custom metrics).
 - Version lists are enumerated (entity selector limit); re-run the script after new releases or new versions appear.
-- The packets-received tile filters hosts by the exposed versions the script found when it ran (plus every vulnerable
-  PHP patch release), to keep the query short: re-run the script to pick up hosts that start running a new exposed version.
+- The activity tiles filter hosts by the exposed versions the script found when it ran (plus every vulnerable PHP
+  patch release), to keep the query short: re-run the script to pick up hosts that start running a new exposed version.
+- The log tile needs a log record count metric with a host dimension. `dt.log.status_per_entity_count` exists where
+  logs flow through OpenPipeline (SaaS); on Managed use `--log-metric` with a log metric you have, or `--no-log-tile`.
+  A tile shows "no data" if the metric is missing or the hosts send no logs.
 - The markdown layout is a snapshot and does not render tables (markdown tiles hold at most 1000 characters).
 - Kubernetes vs Compute is decided by whether the process belongs to a Kubernetes namespace (CSV and markdown layout).

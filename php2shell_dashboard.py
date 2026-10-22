@@ -619,7 +619,7 @@ def _versions_in(dtype, versions):
 
 
 def _hosts_running(dtype, versions):
-    """Hosts that run at least one process with one of these versions."""
+    """Metric-selector filters for the hosts that run at least one process with one of these versions."""
     return [('in("dt.entity.host",entitySelector("type(host),toRelationships.isProcessOf('
              'type(process_group_instance),softwareTechnologies.version(%s))"))')
             % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk)
@@ -769,14 +769,24 @@ def build_dashboard_native(base, rows, total_scanned, args):
                  "GRAPH_CHART", ["BLUE", "GREEN"], top, 0, W, 190)
         top += 190
 
-    # ---- network: packets received by the hosts that run a vulnerable runtime
+    # ---- activity on exposed hosts: packets received and log volume, to spot spikes
     host_parts = [x for t in used for x in _hosts_running(*exposed_versions[t]) if exposed_versions[t][1]]
     if host_parts:
-        top = header("NETWORK  |  traffic on hosts that run a vulnerable or end-of-life %s" % " / ".join(used), top)
+        runtimes = " / ".join(used)
+        top = header("ACTIVITY  |  traffic and logging on hosts that run a vulnerable or end-of-life %s" % runtimes, top)
+        hosts = _or(host_parts)
         packets = ('builtin:host.net.nic.packets.rx:filter(%s):splitBy("dt.entity.host"):sum'
-                   ':sort(value(sum,descending)):limit(10)' % _or(host_parts))
-        explorer("Packets received: top 10 hosts running vulnerable %s" % " / ".join(used), [packets], "GRAPH_CHART",
-                 ["BLUE"], top, 0, W, 266, aliases=[])
+                   ':sort(value(sum,descending)):limit(10)' % hosts)
+        tiles_here = [("Packets received: top 10 hosts running vulnerable %s" % runtimes, packets)]
+        if not args.no_log_tile:
+            logs = ('%s:filter(%s):splitBy("dt.entity.host"):sum:sort(value(sum,descending)):limit(10)'
+                    % (args.log_metric, hosts))
+            tiles_here.append(("Log volume: top 10 hosts running vulnerable %s (look for spikes)" % runtimes, logs))
+        tw = W // len(tiles_here)
+        tw -= tw % 38
+        for i, (name, sel) in enumerate(tiles_here):
+            explorer(name, [sel], "GRAPH_CHART", ["BLUE"], top, i * tw, tw if i < len(tiles_here) - 1 else W - tw * i,
+                     266, aliases=[])
         top += 266
 
     # ---- process tables
@@ -867,6 +877,11 @@ def main():
     p.add_argument("--layout", choices=("native", "markdown"), default="native",
                    help="native = live Data explorer tiles like a hand-built dashboard (default); "
                         "markdown = static snapshot tiles")
+    p.add_argument("--log-metric", default="dt.log.status_per_entity_count",
+                   help="metric with log record counts and a dt.entity.host dimension, used by the log-spike tile "
+                        "(default dt.log.status_per_entity_count)")
+    p.add_argument("--no-log-tile", action="store_true",
+                   help="native layout: leave out the log-spike tile for hosts running exposed PHP")
     p.add_argument("--no-process-tables", action="store_true",
                    help="native layout: leave out the per-process tables (vulnerable, end-of-life, all)")
     p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
