@@ -618,6 +618,14 @@ def _versions_in(dtype, versions):
             for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
 
 
+def _hosts_with_versions(dtype, versions):
+    """Metric-selector filters for the hosts that run at least one process with one of these versions."""
+    return [('in("dt.entity.host",entitySelector("type(host),toRelationships.isProcessOf('
+             'type(process_group_instance),softwareTechnologies.version(%s))"))')
+            % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk)
+            for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
+
+
 def _or(parts):
     return parts[0] if len(parts) == 1 else "or(%s)" % ",".join(parts)
 
@@ -661,10 +669,16 @@ def build_dashboard_native(base, rows, total_scanned, args):
 
     patched_rule = [(1, GREEN), (0, YELLOW), (None, FALLBACK)]  # nothing patched yet shows yellow
 
-    def visual(kind, colors, thresholds=None):
+    def visual(kind, colors, thresholds=None, aliases=None):
+        def alias(i):
+            if kind != "GRAPH_CHART":
+                return VALUE_NAME
+            return (aliases or SERIES_NAMES)[i]
+
         v = {"type": kind, "global": {},
                 "rules": [dict(matcher="%s:" % "AB"[i], properties=dict(
-                    color=c, alias=SERIES_NAMES[i] if kind == "GRAPH_CHART" else VALUE_NAME, **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
+                    color=c, **({"alias": alias(i)} if alias(i) else {}),
+                    **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
                     seriesOverrides=[]) for i, c in enumerate(colors)],
                 "axes": {"xAxis": {"visible": True}, "yAxes": []}, "heatmapSettings": {"yAxis": "VALUE"},
                 "thresholds": [], "tableSettings": {"isThresholdBackgroundAppliedToCell": False,
@@ -678,7 +692,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
             v["singleValueSettings"] = {"showTrend": False, "showSparkLine": False, "linkTileColorToThreshold": True}
         return v
 
-    def explorer(name, selectors, kind, colors, top, left, width, height, thresholds=None):
+    def explorer(name, selectors, kind, colors, top, left, width, height, thresholds=None, aliases=None):
         qs = [{"id": "AB"[i], "spaceAggregation": "AUTO", "timeAggregation": "DEFAULT", "metricSelector": sel,
                "rate": "NONE", "enabled": True, "histogram": False} for i, sel in enumerate(selectors)]
         if kind == "TABLE":
@@ -688,7 +702,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
         else:
             exprs = ["resolution=Inf&(%s):limit(100):names" % selectors[0], "resolution=null&(%s)" % selectors[0]]
         add("DATA_EXPLORER", name, top, left, width, height, isAutoRefreshDisabled=False, customName=name,
-            queries=qs, visualConfig=visual(kind, colors, thresholds), queriesSettings={"resolution": ""}, metricExpressions=exprs)
+            queries=qs, visualConfig=visual(kind, colors, thresholds, aliases), queriesSettings={"resolution": ""}, metricExpressions=exprs)
 
     # ---- header + CVE section
     top = header("%s exposure  |  live from OneAgent process technology data" % " & ".join(used), 0)
@@ -753,6 +767,14 @@ def build_dashboard_native(base, rows, total_scanned, args):
         explorer("All %s vs patched over time" % tech, [_metric(f["all"], "count"), _metric(f["patched"], "count")],
                  "GRAPH_CHART", ["BLUE", "GREEN"], top, 0, W, 190)
         top += 190
+        if tech == "PHP" and not args.no_log_tile:
+            # log volume per host, only for hosts that run an exposed PHP version, to spot spikes
+            exposed = _hosts_with_versions(dtype, b["vulnerable"] + b["eol_backport"] + b["eol_nofix"])
+            log_sel = ('%s:filter(%s):splitBy("dt.entity.host"):sum:sort(value(sum,descending)):limit(10)'
+                       % (args.log_metric, _or(exposed)))
+            explorer("Log volume on hosts running vulnerable PHP (top 10 hosts): look for spikes", [log_sel],
+                     "GRAPH_CHART", ["DEFAULT"], top, 0, W, 228, aliases=[None])
+            top += 228
 
     # ---- process tables
     if args.process_tables:
@@ -842,6 +864,11 @@ def main():
     p.add_argument("--layout", choices=("native", "markdown"), default="native",
                    help="native = live Data explorer tiles like a hand-built dashboard (default); "
                         "markdown = static snapshot tiles")
+    p.add_argument("--log-metric", default="dt.log.status_per_entity_count",
+                   help="metric with log record counts and a dt.entity.host dimension, used by the log-spike tile "
+                        "(default dt.log.status_per_entity_count)")
+    p.add_argument("--no-log-tile", action="store_true",
+                   help="native layout: leave out the log-spike tile for hosts running exposed PHP")
     p.add_argument("--no-process-tables", action="store_true",
                    help="native layout: leave out the per-process tables (vulnerable, end-of-life, all)")
     p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
