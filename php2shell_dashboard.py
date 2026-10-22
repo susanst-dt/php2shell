@@ -281,7 +281,35 @@ def fix_for(tech, raw, status):
     return ".".join(map(str, fixed)) if fixed else "migrate to %s+" % ".".join(map(str, NODE_FIXED[min(NODE_FIXED)]))
 
 
-def build_dashboard(base, rows, total_scanned, args):
+def est_height(lines, col_width):
+    """Rendered height: only link text counts, not the URL; ~7px per char, ~21px per line."""
+    chars = max(30, int((col_width - 60) / 7.0))
+    n = sum(-(-max(1, len(re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", l))) // chars) for l in lines)
+    return max(76, 38 * -(-(40 + 21 * n) // 38))
+
+
+def cve_tile_specs(used):
+    """(name, markdown, relative width) tiles describing the CVEs, shown at the top of the dashboard."""
+    cve_tiles = []
+    if "PHP" in used:
+        cve_tiles.append(("PHP2Shell - CVE-2026-109618 / CVE-2026-109619",
+                          "**PHP2Shell**\n\n**CVE-2026-109618**\n\n**CVE-2026-109619**\n\n"
+                          "CVSS 4.0 **9.2 Critical**: unauthenticated remote code execution in the PHP core. "
+                          "Disclosed 2026-10-21.\n\nFixed in **8.5.12 \u00B7 8.4.27 \u00B7 8.3.36 \u00B7 8.2.35**. "
+                          "8.1 and older are EOL, no fix.\n\n"
+                          "[php.net advisory](https://www.php.net/archive/2026.php#2026-10-21-1)", 380))
+    if "Node.js" in used:
+        def cve_line(c):
+            return "* **%s** %s: %s" % c
+        half = (len(NODE_CVES) + 1) // 2
+        head = ("**Node.js Oct-2026 security releases** (10 CVEs), fixed in **22.23.4 \u00B7 24.22.1 \u00B7 26.12.1**. "
+                "[Advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)\n\n")
+        cve_tiles.append(("Node.js CVEs (1/2)", head + "\n".join(cve_line(c) for c in NODE_CVES[:half]), 570))
+        cve_tiles.append(("Node.js CVEs (2/2)", "\n".join(cve_line(c) for c in NODE_CVES[half:]), 570))
+    return cve_tiles
+
+
+def build_dashboard_markdown(base, rows, total_scanned, args):
     used = [TECHS[t][1] for t in args.techs]
     LIMIT = 1000  # Dynatrace markdown tiles hold at most 1000 characters
     W = 1520
@@ -327,12 +355,6 @@ def build_dashboard(base, rows, total_scanned, args):
         tile("HEADER", text, top, 0, W, 38)
         return top + 38
 
-    def est_height(lines, col_width):
-        """Rendered height: only link text counts, not the URL; ~7px per char, ~21px per line."""
-        chars = max(30, int((col_width - 60) / 7.0))
-        n = sum(-(-max(1, len(re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", l))) // chars) for l in lines)
-        return max(76, 38 * -(-(40 + 21 * n) // 38))
-
     def cards(name, lines, top, cols=2, empty="_Nothing to show._"):
         """Bullet lines packed into <=1000 char tiles, laid out in `cols` columns."""
         chunks, cur = [], []
@@ -357,22 +379,7 @@ def build_dashboard(base, rows, total_scanned, args):
         return top
 
     # ------------------------------------------------------------------ executive
-    cve_tiles = []
-    if "PHP" in used:
-        cve_tiles.append(("PHP2Shell - CVE-2026-109618 / CVE-2026-109619",
-                          "**PHP2Shell**\n\n**CVE-2026-109618**\n\n**CVE-2026-109619**\n\n"
-                          "CVSS 4.0 **9.2 Critical**: unauthenticated remote code execution in the PHP core. "
-                          "Disclosed 2026-10-21.\n\nFixed in **8.5.12 \u00B7 8.4.27 \u00B7 8.3.36 \u00B7 8.2.35**. "
-                          "8.1 and older are EOL, no fix.\n\n"
-                          "[php.net advisory](https://www.php.net/archive/2026.php#2026-10-21-1)", 380))
-    if "Node.js" in used:
-        def cve_line(c):
-            return "* **%s** %s: %s" % c
-        half = (len(NODE_CVES) + 1) // 2
-        head = ("**Node.js Oct-2026 security releases** (10 CVEs), fixed in **22.23.4 \u00B7 24.22.1 \u00B7 26.12.1**. "
-                "[Advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)\n\n")
-        cve_tiles.append(("Node.js CVEs (1/2)", head + "\n".join(cve_line(c) for c in NODE_CVES[:half]), 570))
-        cve_tiles.append(("Node.js CVEs (2/2)", "\n".join(cve_line(c) for c in NODE_CVES[half:]), 570))
+    cve_tiles = cve_tile_specs(used)
     scale = W / float(sum(w for _, _, w in cve_tiles))
     widths = [int(round(w * scale / 38.0)) * 38 for _, _, w in cve_tiles]
     widths[-1] = W - sum(widths[:-1])
@@ -521,12 +528,251 @@ def build_dashboard(base, rows, total_scanned, args):
        % (args.frm, ", running only" if args.running_only else ""),
        top, 0, W, 190)
 
-    for t in tiles:  # Dynatrace requires every dimension to be a positive multiple of 38
-        for k, v in t["bounds"].items():
-            assert v % 38 == 0 and (v > 0 or k in ("top", "left")), "tile %r bound %s=%s" % (t["name"], k, v)
     return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner or "php2shell-script",
                                   "dashboardFilter": {"timeframe": "-2h"}, "hasConsistentColors": False},
             "tiles": tiles}
+
+
+# --------------------------------------------------------------------------- #
+# Native layout: live Data explorer tiles (single values, trend graphs, process tables)
+# --------------------------------------------------------------------------- #
+PGI_DIM = "dt.entity.process_group_instance"
+MAX_VERSIONS_PER_PREDICATE = 50  # Dynatrace entity selector limit for softwareTechnologies.version
+NODE_PATCH_RANGE = 6             # enumerate Node.js patch numbers 0..5 (plus every version actually seen)
+
+
+def _chunks(items, n):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def _dedupe(items):
+    seen, out = set(), []
+    for i in items:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def version_buckets(tech, seen):
+    """Version strings per status bucket. The entity selector matches exact versions, so each bucket is enumerated:
+    every patch release in the range that matters, plus every version actually found by the scan."""
+    b = {"vulnerable": [], "patched": [], "eol_backport": [], "eol_nofix": []}
+    if tech == "PHP":
+        for (ma, mi), fx in PHP_FIXED.items():
+            b["vulnerable"] += ["%d.%d.%d" % (ma, mi, p) for p in range(0, fx[2])]
+            b["patched"] += ["%d.%d.%d" % (ma, mi, p) for p in range(fx[2], fx[2] + 31)]
+        b["patched"] += ["%d.%d.%d" % (ma, mi, p) for ma, mi in ((8, 6), (8, 7), (9, 0), (9, 1)) for p in range(31)]
+        b["eol_backport"] = ["8.%d.%d" % (mi, p) for mi in (1, 0) for p in range(41)]
+        b["eol_nofix"] = ["%d.%d.%d" % (ma, mi, p) for ma, mis in ((7, range(5)), (5, range(7))) for mi in mis
+                          for p in range(41)]
+    else:
+        for major, (_, fmi, fpa) in NODE_FIXED.items():
+            for mi in range(0, fmi + 1):
+                for pa in range(NODE_PATCH_RANGE):
+                    if (mi, pa) < (fmi, fpa):
+                        b["vulnerable"].append("%d.%d.%d" % (major, mi, pa))
+            for mi in range(fmi, fmi + 9):
+                for pa in range(NODE_PATCH_RANGE):
+                    if (mi, pa) >= (fmi, fpa):
+                        b["patched"].append("%d.%d.%d" % (major, mi, pa))
+    for r in seen:  # make sure every version present today lands in the right bucket
+        v = parse_version(r["version"])
+        if r["tech"] != tech or v is None:
+            continue
+        name = {VULN: "vulnerable", PATCHED: "patched"}.get(r["status"])
+        if name is None and r["status"] == EOL:
+            name = ("eol_backport" if v[:2] >= (8, 0) else "eol_nofix") if tech == "PHP" else None
+        if name:
+            b[name].append(r["version"])
+    return {k: _dedupe(v) for k, v in b.items()}
+
+
+def _in(entity_selector):
+    return 'in("%s",entitySelector("%s"))' % (PGI_DIM, entity_selector)
+
+
+def _versions_in(dtype, versions):
+    return [_in('type(process_group_instance),softwareTechnologies.version(%s)'
+                % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk))
+            for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
+
+
+def _or(parts):
+    return parts[0] if len(parts) == 1 else "or(%s)" % ",".join(parts)
+
+
+def _metric(filter_expr, kind):
+    base = "builtin:pgi.availability.state:filter(%s)" % filter_expr
+    if kind == "count":
+        return base + ":splitBy():count"
+    return base + ':last:splitBy("%s","dt.entity.host","dt.host_group.id"):sort(value(auto,descending))' % PGI_DIM
+
+
+def build_dashboard_native(base, rows, total_scanned, args):
+    used = [TECHS[t][1] for t in args.techs]
+    dtypes = {TECHS[t][1]: TECHS[t][0] for t in args.techs}
+    W = 1520
+    tiles = []
+
+    def add(kind, name, top, left, width, height, **extra):
+        d = {"name": name, "tileType": kind, "configured": True,
+             "bounds": {"top": top, "left": left, "width": width, "height": height}, "tileFilter": {}}
+        d.update(extra)
+        tiles.append(d)
+
+    def md(name, text, top, left, width, height):
+        add("MARKDOWN", name, top, left, width, height, markdown=text)
+
+    def header(text, top):
+        add("HEADER", text, top, 0, W, 38, isAutoRefreshDisabled=False)
+        return top + 38
+
+    palette = {"RED": "#c4233b", "GREEN": "#2ab06f", "ORANGE": "#fd8232", "BLUE": "#1496ff"}
+
+    def alert(color):  # colored when at least one process matches, green when none
+        return [(">=", 1, palette[color]), ("<", 1, palette["GREEN"])]
+
+    def fixed(color):
+        return [(">=", 0, palette[color])]
+
+    def visual(kind, colors, thresholds=None):
+        v = {"type": kind, "global": {},
+                "rules": [dict(matcher="%s:" % "AB"[i], properties=dict(
+                    color=c, alias="Process State", **({"seriesType": "LINE"} if kind == "GRAPH_CHART" else {})),
+                    seriesOverrides=[]) for i, c in enumerate(colors)],
+                "axes": {"xAxis": {"visible": True}, "yAxes": []}, "heatmapSettings": {"yAxis": "VALUE"},
+                "thresholds": [], "tableSettings": {"isThresholdBackgroundAppliedToCell": False, "hiddenColumns": []},
+                "graphChartSettings": {"connectNulls": False},
+                "honeycombSettings": {"showHive": True, "showLegend": True, "showLabels": False}}
+        if thresholds:  # color the whole single-value tile, not just the sparkline
+            v["thresholds"] = [{"axisTarget": "LEFT", "columnId": "Process State", "queryId": "A", "visible": True,
+                                "rules": [{"color": c, "comparator": cmp_, "value": val} for cmp_, val, c in thresholds]}]
+            v["singleValueSettings"] = {"showTrend": False, "showSparkLine": False, "linkTileColorToThreshold": True}
+        return v
+
+    def explorer(name, selectors, kind, colors, top, left, width, height, thresholds=None):
+        qs = [{"id": "AB"[i], "spaceAggregation": "AUTO", "timeAggregation": "DEFAULT", "metricSelector": sel,
+               "rate": "NONE", "enabled": True, "histogram": False} for i, sel in enumerate(selectors)]
+        if kind == "TABLE":
+            exprs = ["resolution=null&(%s):names:fold(auto)" % selectors[0]]
+        elif len(selectors) > 1:
+            exprs = ["resolution=null&" + ",".join("(%s):limit(100):names" % x for x in selectors)]
+        else:
+            exprs = ["resolution=Inf&(%s):limit(100):names" % selectors[0], "resolution=null&(%s)" % selectors[0]]
+        add("DATA_EXPLORER", name, top, left, width, height, isAutoRefreshDisabled=False, customName=name,
+            queries=qs, visualConfig=visual(kind, colors, thresholds), queriesSettings={"resolution": ""}, metricExpressions=exprs)
+
+    # ---- header + CVE section
+    top = header("%s exposure  |  live from OneAgent process technology data" % " & ".join(used), 0)
+    specs = cve_tile_specs(used)
+    scale = W / float(sum(w for _, _, w in specs))
+    widths = [int(round(w * scale / 38.0)) * 38 for _, _, w in specs]
+    widths[-1] = W - sum(widths[:-1])
+    ch = max(est_height(t.split("\n"), w) for (_, t, _), w in zip(specs, widths))
+    left = 0
+    for (name, text, _), w in zip(specs, widths):
+        md(name, text, top, left, w, ch)
+        left += w
+    top += ch
+    md("How to read this dashboard",
+       "Tiles are **live metric queries** filtered by the version OneAgent detected on each process "
+       "(`softwareTechnologies.version`). **Colors:** \U0001F535 blue = all processes · \U0001F7E2 green = patched "
+       "(fixed release or newer) · \U0001F534 red = vulnerable, or end-of-life with no fix (tile turns green at 0) · "
+       "\U0001F7E0 orange = end-of-life, community backports or migration only. All = patched + vulnerable + EOL "
+       "(+ any version the dashboard does not know). "
+       "**Version-only:** distro vendors may backport a fix without bumping the version, so confirm with "
+       "`rpm -q` / `dpkg -l` before closing a finding. A process upgraded on disk but not restarted still shows the "
+       "old version, which is correct: it is still exposed.",
+       top, 0, W, 114)
+    top += 114
+
+    # ---- per technology: KPI row + trend
+    sels = {}
+    for tech in used:
+        dtype = dtypes[tech]
+        b = version_buckets(tech, rows)
+        allp = _in("type(process_group_instance),softwareTechnologies(%s)" % dtype)
+        vuln = _versions_in(dtype, b["vulnerable"])
+        pat = _versions_in(dtype, b["patched"])
+        f = {"all": allp, "vuln": _or(vuln), "patched": _or(pat)}
+        if tech == "PHP":
+            f["eol_backport"] = _or(_versions_in(dtype, b["eol_backport"]))
+            f["eol_nofix"] = _or(_versions_in(dtype, b["eol_nofix"]))
+            f["eol"] = _or(_versions_in(dtype, b["eol_backport"] + b["eol_nofix"]))
+        else:  # every other line (<= 21, 23, 25) is end of life: all Node.js that is in no fixed line
+            f["eol"] = "and(%s,not(%s))" % (allp, _or(vuln + pat))
+        sels[tech] = f
+
+        top = header("%s  |  %s" % (tech, "PHP2Shell CVE-2026-109618 / CVE-2026-109619" if tech == "PHP"
+                                    else "Node.js October 2026 security releases"), top)
+        if tech == "PHP":
+            kpis = [("All PHP processes", f["all"], "BLUE", fixed("BLUE")),
+                    ("Patched (fixed release or newer)", f["patched"], "GREEN", fixed("GREEN")),
+                    ("Vulnerable, patch available (8.2–8.5)", f["vuln"], "RED", alert("RED")),
+                    ("EOL 8.0 / 8.1 (backport only)", f["eol_backport"], "ORANGE", alert("ORANGE")),
+                    ("EOL 7.x / 5.x (no fix)", f["eol_nofix"], "RED", alert("RED"))]
+        else:
+            kpis = [("All Node.js processes", f["all"], "BLUE", fixed("BLUE")),
+                    ("Patched (22.23.4 / 24.22.1 / 26.12.1 or newer)", f["patched"], "GREEN", fixed("GREEN")),
+                    ("Vulnerable, patch available (22 / 24 / 26)", f["vuln"], "RED", alert("RED")),
+                    ("EOL lines (no fix)", f["eol"], "ORANGE", alert("ORANGE"))]
+        kw = W // len(kpis)
+        kw = kw - kw % 38
+        for i, (name, flt, color, thr) in enumerate(kpis):
+            explorer(name, [_metric(flt, "count")], "SINGLE_VALUE", [color], top, i * kw,
+                     kw if i < len(kpis) - 1 else W - kw * (len(kpis) - 1), 152, thr)
+        top += 152
+        explorer("All %s vs patched over time" % tech, [_metric(f["all"], "count"), _metric(f["patched"], "count")],
+                 "GRAPH_CHART", ["BLUE", "GREEN"], top, 0, W, 190)
+        top += 190
+
+    # ---- remediation tables
+    top = header("REMEDIATION  |  one row per process, click through to the process page", top)
+    for tech in used:
+        f = sels[tech]
+        if tech == "PHP":
+            left_t = ("PHP vulnerable, patch available: upgrade to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35", f["vuln"])
+            right_t = ("PHP EOL (8.1 and older): community backport or migrate", f["eol"])
+        else:
+            left_t = ("Node.js vulnerable, patch available: upgrade to 22.23.4 / 24.22.1 / 26.12.1", f["vuln"])
+            right_t = ("Node.js EOL lines: migrate to a fixed line (22 / 24 / 26)", f["eol"])
+        for i, (name, flt) in enumerate((left_t, right_t)):
+            explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, i * (W // 2), W // 2, 342)
+        top += 342
+
+    top = header("REFERENCE  |  every process OneAgent identified, any version", top)
+    for tech in used:
+        explorer("All %s processes (reference)" % tech, [_metric(sels[tech]["all"], "table")], "TABLE", ["DEFAULT"],
+                 top, 0, W, 342)
+        top += 342
+
+    top = header("WHAT THIS DASHBOARD CANNOT SEE", top)
+    md("Gaps",
+       "Processes on hosts **without OneAgent** (agency-hosted CMS, appliances, tooling boxes), runtimes OneAgent did "
+       "not fingerprint (for example `php-cgi.exe` under IIS), and idle IIS sites with a `*.php` handler. "
+       "Versions the dashboard does not enumerate (for example Node.js newer than 26, or an unusual patch number) "
+       "are counted in **All** only: re-run the script to add every version currently seen. "
+       "Exploitation hunting (PHP workers spawning shells) needs exec telemetry such as Falco, Tetragon, auditd or Sysmon.",
+       top, 0, W, 152)
+
+    return {"dashboardMetadata": {"name": args.name, "shared": args.shared, "owner": args.owner or "php2shell-script",
+                                  "dashboardFilter": {"timeframe": "-2h"}, "tags": ["security", "php2shell"],
+                                  "dynamicFilters": {"filters": ["CUSTOM_DIMENSION:dt.host_group.id",
+                                                                 "CUSTOM_DIMENSION:Host"], "genericTagFilters": []},
+                                  "hasConsistentColors": False},
+            "tiles": tiles}
+
+
+def build_dashboard(base, rows, total_scanned, args):
+    builder = build_dashboard_markdown if args.layout == "markdown" else build_dashboard_native
+    dash = builder(base, rows, total_scanned, args)
+    for t in dash["tiles"]:  # Dynatrace requires every dimension to be a positive multiple of 38
+        for k, v in t["bounds"].items():
+            assert v % 38 == 0 and (v > 0 or k in ("top", "left")), "tile %r bound %s=%s" % (t["name"], k, v)
+    return dash
+
 
 
 CSV_COLS = ["technology", "version", "status", "process", "host", "listen_ports", "pgi_id", "pg_id", "host_id", "edition"]
@@ -539,7 +785,7 @@ def write_csv(path, rows):
             "status": CSV_STATUS.get(r["status"], r["status"]), "process": r["name"], "host": r["host"],
             "listen_ports": r["ports"], "pgi_id": r["id"], "pg_id": r["pg_id"], "host_id": r["host_id"],
             "edition": r["edition"]} for r in rows]
-    out.sort(key=lambda r: (r["technology"], r["status"], r["version"], r["host"]))
+    out.sort(key=lambda r: (r["technology"] != "PHP", r["technology"], r["status"], r["version"], r["host"]))  # PHP2Shell (critical) first
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLS)
         w.writeheader()
@@ -562,6 +808,9 @@ def main():
     p.add_argument("--name", default=None, help="dashboard name (same name = updated in place)")
     p.add_argument("--owner", default=None, help="dashboard owner (default php2shell-script)")
     p.add_argument("--shared", action="store_true", help="share the dashboard with all users")
+    p.add_argument("--layout", choices=("native", "markdown"), default="native",
+                   help="native = live Data explorer tiles like a hand-built dashboard (default); "
+                        "markdown = static snapshot tiles")
     p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
     p.add_argument("--csv", "--out", metavar="FILE", default="php2shell_exposure.csv",
                    help="CSV with every process (default php2shell_exposure.csv)")
