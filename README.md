@@ -191,7 +191,7 @@ Every run writes a CSV (default `php2shell_exposure.csv` in the current folder),
 | `pgi_id`, `pg_id`, `host_id` | Dynatrace entity IDs of the process instance, process group and host |
 | `edition` | Software edition reported by OneAgent (for example `CLI` for PHP) |
 
-Sorted by technology, status, version and host. The CSV always has every process; the dashboard lists are capped.
+Sorted with PHP first (the critical PHP2Shell findings), then by technology, status, version and host. The CSV always has every process; the dashboard lists are capped.
 Note the CSV calls end-of-life findings `EOL-AFFECTED`, while the dashboard shows them as `VULNERABLE_EOL`.
 
 ## 5. Troubleshooting
