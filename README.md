@@ -12,6 +12,16 @@ individual processes, with links into Dynatrace.
 
 Works on Dynatrace Managed and on SaaS (via the classic API).
 
+## CVEs this checks for
+
+| Technology | CVEs | Notes |
+|---|---|---|
+| PHP | **CVE-2026-109618**, **CVE-2026-109619** ("PHP2Shell") | CVSS 4.0: 9.2 critical. Unauthenticated remote code execution in the PHP core. Disclosed 2026-10-21 |
+| Node.js | October 2026 security releases (**ten CVEs**), including **CVE-2026-111497** | CVE-2026-111497 is the Brotli decoder RCE and the most severe. The full CVE list is in the [Node.js advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) |
+
+The script does not test for individual CVEs. It flags any process whose runtime version is below the release that
+fixes them (see the fixed-version table above), so one version check covers every CVE in that release.
+
 ---
 
 ## 1. Requirements
