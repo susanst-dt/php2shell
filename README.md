@@ -73,7 +73,7 @@ or `brew install python` (macOS), or `apt install python3` / `dnf install python
 ## 2. API token and scopes
 
 Create the token in the Dynatrace UI: **Settings > Integration > Dynatrace API > Generate token**
-(Managed: same path inside the environment; the user needs permission to create API tokens).
+(Managed: **Manage > Access Token**; the user needs permission to create API tokens).
 
 | Scope (UI name) | Scope ID | Needed for |
 |---|---|---|
