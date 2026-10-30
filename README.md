@@ -103,7 +103,7 @@ Create the token in the Dynatrace UI: **Settings > Integration > Dynatrace API >
 | Scope (UI name) | Scope ID | Needed for |
 |---|---|---|
 | Read entities | `entities.read` | Reading processes, hosts, namespaces, workloads (**always required**) |
-| Read configuration | `ReadConfig` | Finding an existing dashboard to update in place |
+| Read configuration | `ReadConfig` | Finding an existing dashboard (`--update`, or to detect that one already exists) |
 | Write configuration | `WriteConfig` | Creating / updating the dashboard |
 
 Minimum for read-only use (`--dry-run`, CSV, or manual import): **`entities.read` only**.
@@ -174,10 +174,25 @@ Dashboard created.
 Open: https://managed.example.com/e/<environment-id>/#dashboard;id=...
 ```
 
-Running it again with the same dashboard name **updates the dashboard in place**, so it can be scheduled
-(cron, systemd timer, Windows Task Scheduler) to keep the snapshot fresh.
+### Creating and updating the dashboard
+
+- **First run** creates the dashboard. If a dashboard with the same name already exists, the script stops and changes
+  nothing, so it never overwrites a dashboard you have edited by hand.
+- **`--update`** refreshes that existing dashboard in place with current data. It keeps the dashboard's owner and
+  sharing (unless you pass `--owner`, `--shared` or `--editable-by-all`), fails with a clear message if no dashboard of
+  that name exists or if several share the name, and prints how many tiles it replaced. Anything you changed by hand
+  in the dashboard (thresholds, tile edits) is replaced by the generated version.
+- Schedule the refresh (cron, systemd timer, Windows Task Scheduler) with `--update`, for example:
+
+```bash
+python3 php2shell_dashboard.py --url https://managed.example.com/e/<environment-id> --update
+```
+
+Use `--name` to keep several dashboards (for example one per environment or per `--tech` subset).
 
 ### Options
+
+`python3 php2shell_dashboard.py -h` (or `--help`) prints every option, grouped, with examples and the token scopes, without needing a URL or token.
 
 | Option | Purpose |
 |---|---|
@@ -192,7 +207,8 @@ Running it again with the same dashboard name **updates the dashboard in place**
 | `--running-only` | Only count processes seen in the last 15 minutes (`--running-minutes N` to change) |
 | `--csv file.csv` | CSV with every process, all statuses (default `php2shell_exposure.csv`, alias `--out`). Written on every run, including `--dry-run` |
 | `--dry-run out.json` | Do not create anything in Dynatrace; write the dashboard JSON to a file |
-| `--name "My name"` | Dashboard name (also the key used for update-in-place). Default: "PHP2Shell, Node2Shell with Python and .NET" when all technologies are checked |
+| `--update` | Update the existing dashboard with this name in place (keeps its owner and sharing); fail if there is none. Without it an existing dashboard is never overwritten |
+| `--name "My name"` | Dashboard name (also the key `--update` uses to find the dashboard). Default: "PHP2Shell, Node2Shell with Python and .NET" when all technologies are checked |
 | `--owner user@company.com` | Dashboard owner (default: the owner of the API token, i.e. whoever runs the script) |
 | `--editable-by-all` | Let every user edit the dashboard (needs `WriteConfig`; automatic when the token owner is unknown) |
 | `--shared` | Share the dashboard with all users (view access) |

@@ -29,8 +29,9 @@ Caveats
   - OneAgent reports the running process. A process upgraded on disk but not restarted still
     shows the old version, which is correct: it is still exposed.
 
-The dashboard is a snapshot of the moment the script ran. Re-run it (same
-dashboard name = updated in place) to refresh, e.g. from cron / Task Scheduler.
+Re-run with --update to refresh the existing dashboard in place (same name; owner and
+sharing are kept), e.g. from cron / Task Scheduler. Without --update an existing dashboard
+is never overwritten.
 
 Authentication: API token (Authorization: Api-Token ...) with scopes
   entities.read      (Read entities)
@@ -1030,49 +1031,77 @@ def write_csv(path, rows):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Create a classic Dynatrace dashboard of processes exposed to the "
-                                            "PHP2Shell and Node.js Oct-2026 vulnerabilities.")
-    p.add_argument("--url", "--base-url", default=os.environ.get("DT_URL"),
+    p = argparse.ArgumentParser(
+        prog="php2shell_dashboard.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Find the PHP, Node.js, .NET and Python processes that OneAgent monitors and that are exposed to the\n"
+                    "October 2026 vulnerabilities, write a CSV of them and create a classic Dynatrace dashboard.",
+        epilog="""examples:
+  Interactive (prompts for the URL and a hidden token):
+    python3 php2shell_dashboard.py
+
+  Managed, create the dashboard (also owned by whoever owns the token):
+    python3 php2shell_dashboard.py --url https://managed.example.com/e/<environment-id> --token dt0c01.XXXX
+
+  Refresh the dashboard created earlier (same name) with current data:
+    python3 php2shell_dashboard.py --url https://managed.example.com/e/<environment-id> --update
+
+  Read-only: write the dashboard JSON and CSV, then import the JSON by hand:
+    python3 php2shell_dashboard.py --dry-run dashboard.json --csv processes.csv
+
+  Only one technology, and ask Dynatrace why an import is rejected:
+    python3 php2shell_dashboard.py --tech dotnet --validate
+
+API token scopes: entities.read (always); ReadConfig and WriteConfig to create or update the dashboard
+or to use --validate. On Windows use "py -3" instead of "python3". Full documentation: README.md""")
+    g_conn = p.add_argument_group("connection")
+    g_what = p.add_argument_group("what to check")
+    g_dash = p.add_argument_group("dashboard")
+    g_out = p.add_argument_group("output and checks")
+    g_conn.add_argument("--url", "--base-url", default=os.environ.get("DT_URL"),
                    help="Managed: https://<host>/e/<environment-id>  ActiveGate: https://<ag>:9999/e/<id>  "
                         "SaaS: https://<id>.live.dynatrace.com   (env DT_URL)")
-    p.add_argument("--token", default=os.environ.get("DT_API_TOKEN") or os.environ.get("DT_TOKEN"),
+    g_conn.add_argument("--token", default=os.environ.get("DT_API_TOKEN") or os.environ.get("DT_TOKEN"),
                    help="API token (env DT_API_TOKEN or DT_TOKEN, or hidden prompt)")
-    p.add_argument("--tech", default="php,node,dotnet,python",
+    g_what.add_argument("--tech", default="php,node,dotnet,python",
                    help="technologies to check: any of php, node, dotnet, python, comma separated (default all four)")
-    p.add_argument("--no-kev", action="store_true",
+    g_what.add_argument("--no-kev", action="store_true",
                    help="do not read the CISA KEV feed (use the built-in snapshot; for networks without internet access)")
-    p.add_argument("--from", "--timeframe", dest="frm", default="now-24h",
+    g_what.add_argument("--from", "--timeframe", dest="frm", default="now-24h",
                    help="entity timeframe, default now-24h (e.g. now-2h, now-7d)")
-    p.add_argument("--running-only", action="store_true", help="only processes seen in the last --running-minutes")
-    p.add_argument("--running-minutes", type=int, default=15)
-    p.add_argument("--name", default=None, help="dashboard name (same name = updated in place)")
-    p.add_argument("--owner", default=os.environ.get("DT_DASHBOARD_OWNER"),
+    g_what.add_argument("--running-only", action="store_true", help="only processes seen in the last --running-minutes")
+    g_what.add_argument("--running-minutes", type=int, default=15, help="with --running-only: how recent counts as running (default 15)")
+    g_dash.add_argument("--update", action="store_true",
+                        help="update the existing dashboard with this name in place (keeps its owner and sharing) and "
+                             "fail if there is none; without --update an existing dashboard is never overwritten")
+    g_dash.add_argument("--name", default=None, help="dashboard name (default depends on --tech); --update finds the dashboard by this name")
+    g_dash.add_argument("--owner", default=os.environ.get("DT_DASHBOARD_OWNER"),
                    help="Dynatrace user who owns (and can edit) the dashboard. Default: the owner of the API token, "
                         "i.e. whoever runs the script (env DT_DASHBOARD_OWNER)")
-    p.add_argument("--editable-by-all", action="store_true",
+    g_dash.add_argument("--editable-by-all", action="store_true",
                    help="also let every user edit the dashboard (needs WriteConfig; automatic if the token owner is unknown)")
-    p.add_argument("--shared", action="store_true", help="share the dashboard with all users")
-    p.add_argument("--layout", choices=("native", "markdown"), default="native",
+    g_dash.add_argument("--shared", action="store_true", help="share the dashboard with all users")
+    g_dash.add_argument("--layout", choices=("native", "markdown"), default="native",
                    help="native = live Data explorer tiles like a hand-built dashboard (default); "
                         "markdown = static snapshot tiles")
-    p.add_argument("--detail", action="store_true",
+    g_dash.add_argument("--detail", action="store_true",
                    help="native layout: add the per-technology KPI rows (taller; may exceed the height Dynatrace "
                         "accepts on import, see MAX_IMPORT_HEIGHT)")
-    p.add_argument("--validate", action="store_true",
+    g_out.add_argument("--validate", action="store_true",
                    help="send the dashboard to Dynatrace's validator and print exactly which constraints fail "
                         "(needs WriteConfig; nothing is created)")
-    p.add_argument("--with-expressions", action="store_true",
+    g_dash.add_argument("--with-expressions", action="store_true",
                    help="native layout: also write the generated metricExpressions copies of every query (about 2.2x "
                         "larger file). Off by default: Dynatrace rebuilds them when the dashboard is opened")
-    p.add_argument("--slim", action="store_true", help=argparse.SUPPRESS)  # old name of the default, kept for scripts
-    p.add_argument("--no-process-tables", action="store_true",
+    g_dash.add_argument("--slim", action="store_true", help=argparse.SUPPRESS)  # old name of the default, kept for scripts
+    g_dash.add_argument("--no-process-tables", action="store_true",
                    help="native layout: leave out the per-process tables (vulnerable, end-of-life, all)")
-    p.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
-    p.add_argument("--csv", "--out", metavar="FILE", default="php2shell_exposure.csv",
+    g_dash.add_argument("--max-rows", type=int, default=20, help="max entries per list (CSV always has everything)")
+    g_out.add_argument("--csv", "--out", metavar="FILE", default="php2shell_exposure.csv",
                    help="CSV with every process (default php2shell_exposure.csv)")
-    p.add_argument("--dry-run", metavar="FILE", help="do not touch the tenant's dashboards; write dashboard JSON to FILE")
-    p.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed Managed certificate)")
-    p.add_argument("--ca-bundle", help="PEM file with your Managed CA certificate")
+    g_out.add_argument("--dry-run", metavar="FILE", help="do not touch the tenant's dashboards; write dashboard JSON to FILE")
+    g_conn.add_argument("--insecure", action="store_true", help="skip TLS verification (self-signed Managed certificate)")
+    g_conn.add_argument("--ca-bundle", help="PEM file with your Managed CA certificate")
     args = p.parse_args()
     args.slim = not args.with_expressions
     args.process_tables = not args.no_process_tables
@@ -1096,10 +1125,12 @@ def main():
     # Who may edit the dashboard: the user running the script (owner of the API token). If that cannot be
     # determined, fall back to a dashboard that every user can view and edit.
     args.edit_all = args.editable_by_all
+    args.owner_given = bool(args.owner)
     if not args.owner:
         args.owner = dt.token_owner()
         if args.owner:
-            print("Dashboard owner (editable by): %s" % args.owner)
+            if not args.update:  # with --update the dashboard keeps the owner it already has
+                print("Dashboard owner (editable by): %s" % args.owner)
         else:
             args.edit_all = True
             args.owner = "php2shell-script"
@@ -1144,12 +1175,28 @@ def main():
         return
 
     existing = [d for d in dt.call("GET", "/api/config/v1/dashboards").get("dashboards", []) if d.get("name") == args.name]
-    if existing:
+    if args.update:
+        if not existing:
+            sys.exit("--update: no dashboard named %r exists in this environment. Run without --update to create it, "
+                     "or pass the right --name." % args.name)
+        if len(existing) > 1:
+            sys.exit("--update: %d dashboards are named %r (ids: %s). Rename the extras, or pass a unique --name."
+                     % (len(existing), args.name, ", ".join(d["id"] for d in existing)))
         did = existing[0]["id"]
+        current = dt.call("GET", "/api/config/v1/dashboards/" + did)
+        meta = current.get("dashboardMetadata", {})
+        if not args.owner_given and meta.get("owner"):  # keep the dashboard's owner and sharing unless asked to change
+            dash["dashboardMetadata"]["owner"] = meta["owner"]
+        if not (args.shared or args.edit_all):
+            dash["dashboardMetadata"]["shared"] = bool(meta.get("shared", False))
         dash["id"] = did  # PUT requires the id in the body as well as in the URL
         dt.call("PUT", "/api/config/v1/dashboards/" + did, body=dash)
-        print("Dashboard updated.")
+        print("Dashboard updated in place: %r (%d tiles, was %d), owner %s." % (
+            args.name, len(dash["tiles"]), len(current.get("tiles", [])), dash["dashboardMetadata"]["owner"]))
     else:
+        if existing:
+            sys.exit("A dashboard named %r already exists (id %s). Nothing was changed. Use --update to replace it in "
+                     "place, or --name to create a second one." % (args.name, existing[0]["id"]))
         did = dt.call("POST", "/api/config/v1/dashboards", body=dash)["id"]
         print("Dashboard created.")
     if args.edit_all and dt.share_with_all_as_editors(did):
