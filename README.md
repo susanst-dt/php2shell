@@ -1,7 +1,8 @@
-# PHP2Shell, Node.js & .NET Oct-2026 exposure dashboard (Dynatrace Managed, classic dashboard)
+# PHP2Shell, Node.js, .NET & Java Oct-2026 exposure dashboard (Dynatrace Managed, classic dashboard)
 
-Finds every PHP, Node.js, .NET and Python process OneAgent monitors, classifies it against the fix releases of October 2026
-(PHP2Shell CVE-2026-109618 / CVE-2026-109619, the Node.js security releases and the .NET out-of-band updates), shows
+Finds every PHP, Node.js, .NET, Python and Java process OneAgent monitors, classifies it against the fix releases of October 2026
+(PHP2Shell CVE-2026-109618 / CVE-2026-109619, the Node.js security releases, the .NET out-of-band updates and the Java
+CVE-2026-114820 Oracle Security Alert / OpenJDK advisory), shows
 which of the CVEs are in the [CISA Known Exploited Vulnerabilities (KEV) catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) and creates a
 **classic dashboard** showing where the vulnerable runtimes are: hosts, Kubernetes namespaces/workloads and
 individual processes, with links into Dynatrace.
@@ -12,6 +13,7 @@ individual processes, with links into Dynatrace.
 | Node.js | 22.23.4, 24.22.1, 26.12.1 (other lines: EOL) | https://nodejs.org/en/blog/vulnerability/october-2026-security-releases |
 | .NET | 8.0.33, 9.0.22, 10.0.14 (.NET 11: RC3; 7 and older are out of support) | https://devblogs.microsoft.com/dotnet/dotnet-october-2026-oob-security-updates/ |
 | Python | End-of-life check only: 3.10 and older are EOL, 3.11 to 3.15 supported (no CVE is checked against the interpreter, see below) | https://devguide.python.org/versions/ |
+| Java | Any build newer than 27.0.1.0.2, 25.0.5.0.2, 21.0.13.0.2, 17.0.21.0.2, 11.0.32.1 (Oracle 11.0.33.0.2), 8u504 (Oracle 8u511); 22, 23, 24, 26 and 7 or older: EOL | https://openjdk.org/groups/vulnerability/advisories/2026-10-24, https://www.oracle.com/security-alerts/alert-cve-2026-114820.html |
 
 Works on Dynatrace Managed and on SaaS (via the classic API).
 
@@ -57,6 +59,23 @@ released 2026-10-25). The advisory does not state severities.
 and .NET advisories because it is a bug in the **Google Brotli library** (versions 1.0.3 to 1.2.0, fixed in 1.0.10, 1.1.1
 and 1.2.1; CVSS 3.1 9.8, CVSS 4.0 9.2, CWE-252/787), not in one runtime. NVD also lists Python's `brotlicffi` package
 (below 1.2.1.0), Go's `andybalholm/brotli`, Istio, Envoy, Bun and others. The Python **interpreter is not affected**.
+
+**Java: CVE-2026-114820** ([NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-114820),
+[Oracle Security Alert](https://www.oracle.com/security-alerts/alert-cve-2026-114820.html),
+[OpenJDK advisory](https://openjdk.org/groups/vulnerability/advisories/2026-10-24)), published 2026-10-24, CVSS 3.1 9.1
+critical (component JSSE). The JDK trust store (`cacerts`) contained root CAs that had signed **eMudhra** intermediate CAs
+with weak private keys, so a man-in-the-middle can present certificates for any host name that Java TLS clients accept.
+The fix removes those root CAs.
+
+| Distribution | Affected? |
+|---|---|
+| Oracle Java SE, Oracle GraalVM for JDK / Enterprise Edition | Yes: Java SE 8u511-b32, 11.0.33.0.2, 17.0.21.0.2, 21.0.13.0.2, 25.0.5.0.2, 27.0.1.0.2 and earlier; GraalVM for JDK 17.0.21.0.2 / 21.0.13.0.2; GraalVM EE 21.3.20.0.2 |
+| OpenJDK builds (Eclipse Adoptium/Temurin, Amazon Corretto, Azul Zulu, Microsoft, Red Hat build of OpenJDK, ...) | Yes: OpenJDK lists 27.0.1.0.2, 25.0.5.0.2, 21.0.13.0.2, 17.0.21.0.2, 11.0.32.1, 8u504 and earlier (all six lines). Amazon shipped fixed Corretto 8/11/17/21/25/27 on 2026-10-30 |
+| RHEL / Debian / Ubuntu OpenJDK packages | They read the **OS trust store**, so the fix is the distro's `ca-certificates` update (Red Hat: see CVE-2026-114406); Debian also ships fixed `openjdk-*` packages. The Java version alone cannot show this |
+
+OneAgent reports the JVM vendor as the edition (for example `Eclipse Adoptium`, `Amazon Corretto`, `Azul Systems, Inc.`).
+An edition containing "Oracle" or "GraalVM" uses the Oracle limits (higher for 8 and 11); every other vendor uses the
+OpenJDK limits. CVE-2026-114820 was not in the CISA KEV catalog at the last check (catalog 2026.11.17).
 
 **CISA KEV.** At the last check (catalog 2026.10.28) CVE-2026-109618 and CVE-2026-109619 (added 2026-10-26, due
 2026-10-29) and CVE-2026-111497 (Google Brotli, added 2026-10-27, due 2026-11-10) are in the KEV catalog; the other
@@ -198,7 +217,7 @@ Use `--name` to keep several dashboards (for example one per environment or per 
 |---|---|
 | `--no-process-tables` | Native layout: leave out the per-process tables |
 | `--layout native` / `--layout markdown` | `native` (default): live Data explorer tiles like a hand-built dashboard. `markdown`: static snapshot tiles with bar graphics and remediation lists |
-| `--tech php,node,dotnet,python` | Technologies to check (default all four; any subset, for example `--tech dotnet`) |
+| `--tech php,node,dotnet,python,java` | Technologies to check (default all five; any subset, for example `--tech java`) |
 | `--validate` | Send the dashboard to Dynatrace's validator and print exactly which constraints fail (needs `WriteConfig`; nothing is created). Use it when an import says only "Constraints violated" |
 | `--with-expressions` | Also write the generated `metricExpressions` copies of every query (about 2.2x larger file). Off by default: Dynatrace rebuilds them when the dashboard is opened |
 | `--detail` | Native layout: add per-technology KPI rows (they repeat the summary). Makes the dashboard taller than Dynatrace accepts on import, see Limits |
@@ -244,15 +263,16 @@ Every run writes a CSV (default `php2shell_exposure.csv` in the current folder),
 
 | Column | Content |
 |---|---|
-| `technology` | `PHP` or `NODE_JS` |
+| `technology` | `PHP`, `NODE_JS`, `DOTNET`, `PYTHON` or `JAVA` |
 | `version` | Version OneAgent detected (empty if unreadable) |
 | `status` | `VULNERABLE`, `EOL-AFFECTED` (end-of-life line, no fix), `PATCHED` or `UNKNOWN` |
 | `process` | Process name |
 | `host` | Host the process runs on |
 | `listen_ports` | Listening ports |
 | `pgi_id`, `pg_id`, `host_id` | Dynatrace entity IDs of the process instance, process group and host |
-| `edition` | Software edition reported by OneAgent (for example `CLI` for PHP) |
+| `edition` | Software edition reported by OneAgent (for example `CLI` for PHP; for Java the JVM vendor, such as `Eclipse Adoptium`) |
 | `os` | Operating system of the host the process runs on (`LINUX`, `WINDOWS`, ...), because some CVEs are OS-specific |
+| `cves` | CVEs the version check covers for that row, space separated (for example `CVE-2026-114820` for Java), filled for `VULNERABLE`, `EOL-AFFECTED` and `UNKNOWN` rows; empty for `PATCHED`, and for Python (end-of-life check only) |
 
 Sorted with PHP first (the critical PHP2Shell findings), then by technology, status, version and host. The CSV always has every process; the dashboard lists are capped.
 Note the CSV calls end-of-life findings `EOL-AFFECTED`, while the dashboard shows them as `VULNERABLE_EOL`.
@@ -273,12 +293,12 @@ Note the CSV calls end-of-life findings `EOL-AFFECTED`, while the dashboard show
 
 From the version OneAgent detects on each process (a process running more than one technology appears once per technology):
 
-| Status | PHP | Node.js | .NET |
-|---|---|---|---|
-| VULNERABLE | 8.2 below 8.2.35, 8.3 below 8.3.36, 8.4 below 8.4.27, 8.5 below 8.5.12 | 22 below 22.23.4, 24 below 24.22.1, 26 below 26.12.1 | 8 below 8.0.33, 9 below 9.0.22, 10 below 10.0.14 |
-| VULNERABLE_EOL | branch 8.1 or older (no fix, migrate) | any other line (20, 23, 25 and older): EOL, upgrade to a fixed line | 7 and older: out of support, not covered by the advisory, migrate to 8, 9 or 10 |
-| PATCHED | at or above the fixed release (or a newer branch) | at or above the fixed release (or newer than 26) | at or above the fixed release |
-| UNKNOWN | version not readable, check manually | same | same, and .NET 11 (release candidate: RC3 is required, not visible in the version) |
+| Status | PHP | Node.js | .NET | Java (CVE-2026-114820) |
+|---|---|---|---|---|
+| VULNERABLE | 8.2 below 8.2.35, 8.3 below 8.3.36, 8.4 below 8.4.27, 8.5 below 8.5.12 | 22 below 22.23.4, 24 below 24.22.1, 26 below 26.12.1 | 8 below 8.0.33, 9 below 9.0.22, 10 below 10.0.14 | at or below 27.0.1.0.2, 25.0.5.0.2, 21.0.13.0.2, 17.0.21.0.2, 11.0.32.1, 8u504 (Oracle: 11.0.33.0.2, 8u511) |
+| VULNERABLE_EOL | branch 8.1 or older (no fix, migrate) | any other line (20, 23, 25 and older): EOL, upgrade to a fixed line | 7 and older: out of support, not covered by the advisory, migrate to 8, 9 or 10 | non-LTS lines 22, 23, 24, 26 and Java 7 or older |
+| PATCHED | at or above the fixed release (or a newer branch) | at or above the fixed release (or newer than 26) | at or above the fixed release | a newer build of an affected line, or Java 28+ |
+| UNKNOWN | version not readable, check manually | same | same, and .NET 11 (release candidate: RC3 is required, not visible in the version) | same |
 
 **Python (end-of-life check only).** No CVE is checked against the interpreter, so Python has no VULNERABLE status:
 3.10 and older (and 2.x) show as `VULNERABLE_EOL` (`EOL-AFFECTED` in the CSV), 3.11 to 3.15 show as `SUPPORTED`, and a process
@@ -299,7 +319,15 @@ lists every vulnerable .NET runtime on a Linux host separately ("Vulnerable on L
 CVE-2026-111497 applies on all platforms but only to apps that use Brotli, so the version check is an upper bound.
 A self-contained app shows its bundled runtime; installing a newer host runtime does not update it, so rebuild it.
 
-The fixed versions are the `PHP_FIXED` / `NODE_FIXED` / `DOTNET_FIXED` tables at the top of the script; edit them if advisories change.
+**Java specifics.** OneAgent shows versions such as `21.0.8`, `25.0.4.1` or `1.8.0_111`. A fixed build differs from
+an affected one only in the last digits (21.0.13.0.2 affected, 21.0.13.0.3 or 21.0.13.1 fixed), so a process that shows a
+bare `21.0.13` is counted as vulnerable; confirm with `java -version` on the host. Some Java processes report no version
+(they show as "version not reported"). The live dashboard tiles match version strings without the vendor, so `11.0.33` and
+8u505 to 8u511 (fixed for OpenJDK, still affected for Oracle) count as vulnerable there; the CSV uses the vendor. Apps that
+use their own trust store (`-Djavax.net.ssl.trustStore`) are not exposed through `cacerts`, and removing the eMudhra roots
+from `cacerts` mitigates without changing the version. Neither is visible in process data.
+
+The fixed versions are the `PHP_FIXED` / `NODE_FIXED` / `DOTNET_FIXED` / `JAVA_AFFECTED_MAX` tables at the top of the script; edit them if advisories change.
 
 Caveats: the check is version-only. Distro vendors (Red Hat, Ubuntu, SUSE, Debian) may backport a fix without
 changing the version string; those processes show as VULNERABLE here, so confirm with `rpm -q` / `dpkg -l`
@@ -314,8 +342,8 @@ Built like a hand-made Dynatrace dashboard: every tile is a metric query (`built
 version OneAgent detected on each process (`softwareTechnologies.version`), so numbers and tables update with the
 dashboard timeframe. The **Host group / Host** filters at the top narrow the view; leave them empty to see everything, including hosts without a host group.
 
-- **Summary** (top): a grid with one row per technology (PHP, .NET, Node.js) and four tiles each: total processes,
-  vulnerable, end-of-life / unsupported and patched, colored by the same thresholds
+- **Summary** (top): a grid with one row per technology (PHP, Java, .NET, Node.js, Python) and four tiles each: total processes,
+  vulnerable, end-of-life / unsupported and patched, colored by the same thresholds (Java has a fifth: version not reported)
 - **Trends**: one "all processes vs patched over time" graph per technology, two per row. The per-technology KPI
   rows (all, patched, vulnerable and end-of-life split further, .NET on Linux, Python version not reported) repeat the
   summary and are only added with `--detail`
@@ -341,7 +369,7 @@ sample. Static: re-run to refresh.
 
 - **Height.** Dynatrace rejects the import of a classic dashboard that is too tall with the generic error `400: Constraints violated`.
   Tested on one tenant: 4,750 units tall imported fine, 5,244 did not (tile count, file size and the tables themselves were not the cause).
-  The default layout is 4,598 tall. `--detail` adds the KPI rows and goes over, and the script prints a warning when a
+  The default layout is 4,598 tall (with all five technologies: trends, remediation and reference tables go three per row). `--detail` adds the KPI rows and goes over, and the script prints a warning when a
   dashboard is taller than 4,750. Use `--validate` (needs `WriteConfig`) to see the exact constraint Dynatrace reports.
 - The native layout needs the viewing user to have access to process metrics; creating the dashboard needs only the
   token scopes above. It adds no data to the environment (no custom metrics).

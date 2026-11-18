@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PHP2Shell (CVE-2026-109618 / CVE-2026-109619) and Node.js Oct-2026 security release
-exposure dashboard for Dynatrace Managed (also works on SaaS) -- creates a CLASSIC dashboard.
+PHP2Shell (CVE-2026-109618 / CVE-2026-109619), Node.js Oct-2026 security release, .NET, Python and
+Java (CVE-2026-114820, eMudhra root CAs in the JDK trust store) exposure dashboard for Dynatrace Managed (also works on SaaS) -- creates a CLASSIC dashboard.
 
 Pure Python 3.7+ standard library: runs unchanged on Windows, Linux and macOS.
 
@@ -21,6 +21,8 @@ What it does
 Fixed versions (sources dated 21 Oct 2026)
   PHP      8.5.12, 8.4.27, 8.3.36, 8.2.35   https://www.php.net/archive/2026.php#2026-10-21-1
   Node.js  22.23.4, 24.22.1, 26.12.1        https://nodejs.org/en/blog/vulnerability/october-2026-security-releases
+  Java     builds after 27.0.1.0.2, 25.0.5.0.2, 21.0.13.0.2, 17.0.21.0.2, 11.0.32.1 / 11.0.33.0.2 (Oracle),
+           8u504 / 8u511 (Oracle)  https://openjdk.org/groups/vulnerability/advisories/2026-10-24
 
 Caveats
   - Version-only check. Distro vendors (Red Hat, Ubuntu, SUSE) may backport a fix without
@@ -94,13 +96,33 @@ PHP_CVES = ["CVE-2026-109618", "CVE-2026-109619"]
 PYTHON_EOL_MAX = (3, 10)  # 3.10 and older (and 2.x) are end of life; 3.11 to 3.15 are supported
 PYTHON_EOL_DATES = {"3.10": "2026-10-01", "3.9": "2025-10-31", "3.8": "2024-10-07", "3.7": "2023-06-27"}
 PYTHON_CVES = ["CVE-2026-111497"]
+# Java: CVE-2026-114820 (CVSS 3.1 9.1, JSSE), published 2026-10-24 by Oracle (Security Alert) and OpenJDK (advisory
+# 2026-10-24). The JDK trust store (cacerts) shipped root CAs that signed eMudhra intermediates with weak keys; the fix
+# removes them. Affected: the builds below "and earlier". Oracle JDK numbers its 8 and 11 updates ahead of OpenJDK, so
+# the Oracle limits are higher; for 17 and newer both use the same numbers. Lines not listed are end of life.
+#   https://www.oracle.com/security-alerts/alert-cve-2026-114820.html
+#   https://openjdk.org/groups/vulnerability/advisories/2026-10-24
+# Versions are (feature, interim, update, patch, extra); 1.8.0_511 is (8, 0, 511, 0, 0).
+JAVA_AFFECTED_MAX = {
+    "openjdk": {8: (8, 0, 504, 0, 0), 11: (11, 0, 32, 1, 0), 17: (17, 0, 21, 0, 2), 21: (21, 0, 13, 0, 2),
+                25: (25, 0, 5, 0, 2), 27: (27, 0, 1, 0, 2)},
+    "oracle": {8: (8, 0, 511, 0, 0), 11: (11, 0, 33, 0, 2), 17: (17, 0, 21, 0, 2), 21: (21, 0, 13, 0, 2),
+               25: (25, 0, 5, 0, 2), 27: (27, 0, 1, 0, 2)},
+}
+JAVA_ORACLE_RE = re.compile(r"oracle|graalvm", re.I)  # OneAgent edition = JVM vendor (Eclipse Adoptium, Amazon Corretto ...)
+JAVA_CVES = ["CVE-2026-114820"]
 TECHS = {"php": ("PHP", "PHP"), "node": ("NODE_JS", "Node.js"),
-         "dotnet": ("DOTNET", ".NET"), "python": ("PYTHON", "Python")}  # option -> (Dynatrace type, label)
-TECH_KEY = {"PHP": "PHP", "Node.js": "NODE", ".NET": "DOTNET", "Python": "PYTHON"}  # label -> classify() key
+         "dotnet": ("DOTNET", ".NET"), "python": ("PYTHON", "Python"),
+         "java": ("JAVA", "Java")}  # option -> (Dynatrace type, label)
+TECH_KEY = {"PHP": "PHP", "Node.js": "NODE", ".NET": "DOTNET", "Python": "PYTHON", "Java": "JAVA"}  # label -> classify() key
+# CVEs the version check covers, per Dynatrace type (CSV "cves" column). Python is an end-of-life check only.
+TECH_CVES = {"PHP": PHP_CVES, "NODE_JS": [c[0] for c in NODE_CVES], "DOTNET": [c[0] for c in DOTNET_CVES],
+             "PYTHON": [], "JAVA": JAVA_CVES}
 TECH_SUBTITLE = {"PHP": "PHP2Shell CVE-2026-109618 / CVE-2026-109619",
                  "Node.js": "Node.js October 2026 security releases",
                  ".NET": ".NET October 2026 out-of-band security updates",
-                 "Python": "Python end-of-life check, plus the Brotli library CVE-2026-111497"}
+                 "Python": "Python end-of-life check, plus the Brotli library CVE-2026-111497",
+                 "Java": "CVE-2026-114820, eMudhra root CAs in the JDK trust store (Oracle and OpenJDK builds)"}
 
 # CISA Known Exploited Vulnerabilities catalog
 KEV_CATALOG_URL = "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
@@ -131,7 +153,41 @@ def parse_version(raw):
     return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
 
 
-def classify(tech, raw):
+def parse_java_version(raw):
+    """OneAgent Java versions: 11.0.5, 25.0.4.1, 21.0.13.0.3 or legacy 1.8.0_111. Returns a 5-tuple or None."""
+    s = (raw or "").strip()
+    m = re.match(r"1\.(\d+)\.0(?:_(\d+))?", s)
+    if m:
+        return int(m.group(1)), 0, int(m.group(2) or 0), 0, 0
+    m = re.match(r"(\d+)((?:\.\d+){0,4})", s)
+    if not m:
+        return None
+    parts = [int(m.group(1))] + [int(x) for x in m.group(2).split(".")[1:]]
+    return tuple(parts + [0] * (5 - len(parts)))
+
+
+def java_family(edition):
+    return "oracle" if JAVA_ORACLE_RE.search(edition or "") else "openjdk"
+
+
+def java_version_str(v):
+    if v[0] == 8:
+        return "8u%d" % v[2]
+    parts = list(v)
+    while len(parts) > 3 and parts[-1] == 0:
+        parts.pop()
+    return ".".join(map(str, parts))
+
+
+def classify(tech, raw, edition=""):
+    if tech == "JAVA":
+        v = parse_java_version(raw)
+        if v is None:
+            return UNKNOWN
+        limits = JAVA_AFFECTED_MAX[java_family(edition)]
+        if v[0] in limits:
+            return VULN if v <= limits[v[0]] else PATCHED
+        return PATCHED if v[0] > max(limits) else EOL  # newer feature release, or a line that no longer gets fixes
     v = parse_version(raw)
     if v is None:
         return UNKNOWN
@@ -306,7 +362,7 @@ def collect(dt, frm, running_minutes, techs):
         running = (now_ms - last) <= running_minutes * 60000 if last else True
         rows.append({
             "id": e["entityId"], "name": e.get("displayName", ""),
-            "tech": tech, "tech_type": dtype, "edition": edition, "status": classify(TECH_KEY[tech], ver),
+            "tech": tech, "tech_type": dtype, "edition": edition, "status": classify(TECH_KEY[tech], ver, edition),
             "version": ver or "n/a", "scope": scope,
             "environment": ns if ns else first("HOST"),
             "cluster": cluster, "workload": workload or first("PROCESS_GROUP") or e.get("displayName", ""),
@@ -335,13 +391,18 @@ def short_name(name, n=42):
     return (m.group(1) if m else name or "")[:n]
 
 
-def fix_for(tech, raw, status):
+def fix_for(tech, raw, status, edition=""):
     """What to upgrade to, for the remediation lists."""
-    v = parse_version(raw)
+    v = parse_java_version(raw) if tech == "Java" else parse_version(raw)
     if status in (PATCHED, SUPPORTED):
         return "ok"
     if status == UNKNOWN or v is None:
         return "check version"
+    if tech == "Java":
+        limits = JAVA_AFFECTED_MAX[java_family(edition)]
+        if v[0] in limits:
+            return "a build newer than %s" % java_version_str(limits[v[0]])
+        return "migrate to Java 21 or 25 (LTS)"
     if tech == "PHP":
         fixed = PHP_FIXED.get(v[:2])
         return ".".join(map(str, fixed)) if fixed else "migrate to %s+" % ".".join(map(str, PHP_FIXED[max(PHP_FIXED)]))
@@ -425,6 +486,18 @@ def cve_tile_specs(used, kev=None):
                        "`Brotli` and `brotlicffi` (below 1.2.1.0) packages. OneAgent process data cannot see installed "
                        "packages, so check Runtime Vulnerability Analytics or your SCA findings "
                        "([NVD](https://nvd.nist.gov/vuln/detail/CVE-2026-111497)).", 760))
+    if "Java" in used:
+        second.append(("Java - CVE-2026-114820",
+                       "**Java - CVE-2026-114820** (JSSE, CVSS 3.1 **9.1 Critical**, 2026-10-24). The JDK trust store "
+                       "trusted root CAs that signed weak-key **eMudhra** intermediates, so a man-in-the-middle can get "
+                       "its certificate accepted by Java TLS clients. The fix removes those roots from `cacerts`.\n\n"
+                       "**Oracle Java SE, GraalVM and all OpenJDK builds** (Adoptium, Corretto, Zulu, Red Hat, distros). "
+                       "Affected: 27.0.1.0.2 \u00B7 25.0.5.0.2 \u00B7 21.0.13.0.2 \u00B7 17.0.21.0.2 \u00B7 11.0.32.1 "
+                       "(Oracle 11.0.33.0.2) \u00B7 8u504 (Oracle 8u511) and earlier. 22-24, 26, 7 and older: EOL.\n\n"
+                       + kev_note(JAVA_CVES) +
+                       "**Caveat:** RHEL / Debian / Ubuntu OpenJDK use the OS trust store: the fix there is the "
+                       "`ca-certificates` update. [Oracle](https://www.oracle.com/security-alerts/alert-cve-2026-114820.html)"
+                       " \u00B7 [OpenJDK](https://openjdk.org/groups/vulnerability/advisories/2026-10-24)", 760))
     return [r for r in (first, second) if r]
 
 
@@ -609,7 +682,7 @@ def build_dashboard_markdown(base, rows, total_scanned, args):
         rs = t["rows"]
         icon = ICON[VULN] if any(r["status"] == VULN for r in rs) else ICON[EOL]
         vers = ", ".join(sorted({r["version"] for r in rs}))
-        fixes = " / ".join(sorted({fix_for(tech, r["version"], r["status"]) for r in rs}))
+        fixes = " / ".join(sorted({fix_for(tech, r["version"], r["status"], r["edition"]) for r in rs}))
         if scope == "Kubernetes":
             name = link("processgroupdetails", t["pg"], loc[:40])
             where = "%s%s" % (esc(env[:30]), " · " + esc(cluster[:20]) if cluster else "")
@@ -708,6 +781,26 @@ def version_buckets(tech, seen):
         b["eol_nofix"] = ["%d.%d.%d.0" % (ma, mi, p) for ma, mi, top_p in
                           ((7, 0, 25), (6, 0, 45), (5, 0, 20), (3, 1, 40), (3, 0, 20), (2, 2, 10), (2, 1, 40))
                           for p in range(top_p + 1)]
+    elif tech == "Java":
+        # OneAgent strings: 21.0.8, 25.0.4.1, 21.0.13.0.3, 1.8.0_111. The selector cannot tell vendors apart, so a version
+        # that only Oracle still counts as affected (11.0.33, 8u505 to 8u511) is listed as vulnerable (conservative).
+        lim = {k: max(JAVA_AFFECTED_MAX["openjdk"][k], JAVA_AFFECTED_MAX["oracle"][k]) for k in JAVA_AFFECTED_MAX["oracle"]}
+        b["vulnerable"] += ["1.8.0_%d" % u for u in range(100, lim[8][2] + 1)]
+        b["patched"] += ["1.8.0_%d" % u for u in range(lim[8][2] + 1, lim[8][2] + 31)]
+        for line, (_, _, aff_u, aff_p, aff_x) in sorted(lim.items()):
+            if line == 8:
+                continue
+            for u in range(0, aff_u + 1):
+                for tail in ("", ".1", ".2", ".0.1", ".0.2"):
+                    ver = "%d.0.%d%s" % (line, u, tail)
+                    (b["vulnerable"] if classify("JAVA", ver, "Oracle") == VULN else b["patched"]).append(ver)
+            for u in range(aff_u, aff_u + 9):
+                for tail in ("", ".1", ".2", ".0.3", ".0.4"):
+                    ver = "%d.0.%d%s" % (line, u, tail)
+                    if classify("JAVA", ver, "Oracle") == PATCHED:
+                        b["patched"].append(ver)
+        b["eol_nofix"] = ["%d.0.%d" % (line, u) for line in (9, 10, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26)
+                          for u in range(11)] + ["%d" % line for line in (22, 23, 24, 26)]
     else:
         for major, (_, fmi, fpa) in NODE_FIXED.items():
             for mi in range(0, fmi + 1):
@@ -725,9 +818,11 @@ def version_buckets(tech, seen):
         name = {VULN: "vulnerable", PATCHED: "patched", SUPPORTED: "patched"}.get(r["status"])
         if name is None and r["status"] == EOL:
             name = (("eol_backport" if v[:2] >= (8, 0) else "eol_nofix") if tech == "PHP"
-                    else "eol_nofix" if tech in (".NET", "Python") else "eol_seen")
+                    else "eol_nofix" if tech in (".NET", "Python", "Java") else "eol_seen")
         if name:
             b[name].append(r["version"])
+    if tech == "Java":  # a version seen as patched for one vendor and vulnerable for another stays vulnerable
+        b["patched"] = [x for x in b["patched"] if x not in set(b["vulnerable"])]
     return {k: _dedupe(v) for k, v in b.items()}
 
 
@@ -747,6 +842,13 @@ def _hosts_running(dtype, versions):
              'type(process_group_instance),softwareTechnologies.version(%s))"))')
             % ",".join('~"%s:%s~"' % (dtype, v) for v in chunk)
             for chunk in _chunks(versions, MAX_VERSIONS_PER_PREDICATE)]
+
+
+def _grid(n_items, W):
+    """Column widths for n_items tiles side by side: 2 per row, 3 when there are more than four. Multiples of 38."""
+    per_row = 3 if n_items > 4 else 2 if n_items > 1 else 1
+    unit = (W // 38) // per_row * 38
+    return per_row, [unit] * (per_row - 1) + [W - unit * (per_row - 1)]
 
 
 def _or(parts):
@@ -849,6 +951,10 @@ def build_dashboard_native(base, rows, total_scanned, args):
             # OS matters: CVE-2026-114148 (tarball ownership) affects Linux only, CVE-2026-111497 all platforms
             linux = _in('type(process_group_instance),fromRelationships.isProcessOf(type(host),osType(~"LINUX~"))')
             f["vuln_linux"] = "and(%s,%s)" % (f["vuln"], linux)
+        elif tech == "Java":  # end-of-life lines enumerated; whatever matches no list is "version not reported"
+            eol_ins = _versions_in(dtype, b["eol_nofix"])
+            f["eol"] = _or(eol_ins)
+            f["unknown"] = "and(%s,not(%s))" % (allp, _or(vuln + pat + eol_ins))
         else:  # every other line (<= 21, 23, 25) is end of life: all Node.js that is in no fixed line
             f["eol"] = "and(%s,not(%s))" % (allp, _or(vuln + pat))
         sels[tech] = f
@@ -860,7 +966,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
 
     # ---- summary: total, vulnerable, end-of-life and patched processes per technology
     top = header("SUMMARY  |  processes per technology: total, vulnerable, end-of-life, patched", top)
-    order = [t for t in (("PHP", ".NET", "Node.js", "Python")) if t in used]
+    order = [t for t in (("PHP", "Java", ".NET", "Node.js", "Python")) if t in used]
     for tech in order:
         f = sels[tech]
         if tech == "Python":  # no CVE is checked against the interpreter: end-of-life only
@@ -873,8 +979,11 @@ def build_dashboard_native(base, rows, total_scanned, args):
                      ("%s: vulnerable, patch available" % tech, f["vuln"], "RED", alert(RED)),
                      ("%s: end-of-life / unsupported" % tech, f["eol"], "RED", alert("#ef651f")),
                      ("%s: patched" % tech, f["patched"], "GREEN", patched_rule)]
+            if tech == "Java":
+                cells.append(("%s: version not reported" % tech, f["unknown"], "ORANGE", alert(YELLOW)))
+        cw = W // len(cells)  # 380 for four cells, 304 for five: both multiples of 38
         for i, (name, flt, color, thr) in enumerate(cells):
-            explorer(name, [_metric(flt, "count")], "SINGLE_VALUE", [color], top, i * (W // 4), W // 4, 114, thr)
+            explorer(name, [_metric(flt, "count")], "SINGLE_VALUE", [color], top, i * cw, cw, 114, thr)
         top += 114
 
     if args.detail:  # per-technology KPI rows (they repeat the summary and make the dashboard much taller)
@@ -899,6 +1008,12 @@ def build_dashboard_native(base, rows, total_scanned, args):
                         ("EOL / unsupported (7 and older)", f["eol"], "RED", alert("#ef651f")),
                         ("Vulnerable on Linux: also check tarball installs (CVE-2026-114148)", f["vuln_linux"], "RED",
                          alert(RED))]
+            elif tech == "Java":
+                kpis = [("All Java processes", f["all"], "BLUE", solid(BLUE)),
+                        ("Patched (build newer than the affected one)", f["patched"], "GREEN", patched_rule),
+                        ("Vulnerable, patch available (8 / 11 / 17 / 21 / 25 / 27)", f["vuln"], "RED", alert(RED)),
+                        ("EOL lines (22 / 23 / 24 / 26, 7 and older)", f["eol"], "RED", alert("#ef651f")),
+                        ("Version not reported by OneAgent", f["unknown"], "ORANGE", alert(YELLOW))]
             else:
                 kpis = [("All Node.js processes", f["all"], "BLUE", solid(BLUE)),
                         ("Patched (22.23.4 / 24.22.1 / 26.12.1 or newer)", f["patched"], "GREEN", patched_rule),
@@ -915,13 +1030,14 @@ def build_dashboard_native(base, rows, total_scanned, args):
             top += 190
     else:
         top = header("TRENDS  |  all processes vs patched over time", top)
-        gw = W // 2 if len(used) > 1 else W
+        per_row, widths = _grid(len(used), W)
         for i, tech in enumerate(used):
-            if i and i % 2 == 0:
+            if i and i % per_row == 0:
                 top += 190
             f = sels[tech]
+            col = i % per_row
             explorer("All %s vs patched over time" % tech, [_metric(f["all"], "count"), _metric(f["patched"], "count")],
-                     "GRAPH_CHART", ["BLUE", "GREEN"], top, (i % 2) * gw, gw, 190)
+                     "GRAPH_CHART", ["BLUE", "GREEN"], top, sum(widths[:col]), widths[col], 190)
         top += 190
 
     # ---- activity on exposed hosts: packets received, to spot traffic spikes
@@ -938,6 +1054,7 @@ def build_dashboard_native(base, rows, total_scanned, args):
     # ---- process tables
     if args.process_tables:
         top = header("REMEDIATION  |  one row per process, click through to the process page", top)
+        pairs = []  # per technology: the tables that belong side by side, then full-width extras
         for tech in used:
             f = sels[tech]
             if tech == "PHP":
@@ -949,24 +1066,42 @@ def build_dashboard_native(base, rows, total_scanned, args):
             elif tech == ".NET":
                 left_t = (".NET vulnerable, patch available: upgrade to 8.0.33 / 9.0.22 / 10.0.14", f["vuln"])
                 right_t = (".NET EOL / unsupported (7 and older): migrate to .NET 8, 9 or 10", f["eol"])
+            elif tech == "Java":
+                left_t = ("Java vulnerable to CVE-2026-114820: update to a build newer than 27.0.1.0.2 / 25.0.5.0.2 / "
+                          "21.0.13.0.2 / 17.0.21.0.2 / 11.0.32.1 / 8u504 (Oracle 11.0.33.0.2 / 8u511)", f["vuln"])
+                right_t = ("Java EOL lines (22 / 23 / 24 / 26, 7 and older): migrate to 21 or 25", f["eol"])
             else:
                 left_t = ("Node.js vulnerable, patch available: upgrade to 22.23.4 / 24.22.1 / 26.12.1", f["vuln"])
                 right_t = ("Node.js EOL lines: migrate to a fixed line (22 / 24 / 26)", f["eol"])
-            for i, (name, flt) in enumerate((left_t, right_t)):
-                explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, i * (W // 2), W // 2, 342)
+            extra = [(".NET vulnerable on Linux hosts: also check tarball installs (CVE-2026-114148, Linux only)",
+                      f["vuln_linux"])] if tech == ".NET" else []
+            pairs.append(([left_t, right_t], extra))
+        if len(used) > 4:  # five runtimes: every table in one grid, three per row, to stay under the import height
+            flat = [t for two, extra in pairs for t in two + extra]
+            per_row, widths = _grid(len(flat), W)
+            for i, (name, flt) in enumerate(flat):
+                if i and i % per_row == 0:
+                    top += 342
+                col = i % per_row
+                explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, sum(widths[:col]), widths[col], 342)
             top += 342
-            if tech == ".NET":
-                explorer(".NET vulnerable on Linux hosts: also check tarball installs (CVE-2026-114148, Linux only)",
-                         [_metric(f["vuln_linux"], "table")], "TABLE", ["DEFAULT"], top, 0, W, 266)
-                top += 266
+        else:
+            for two, extra in pairs:
+                for i, (name, flt) in enumerate(two):
+                    explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, i * (W // 2), W // 2, 342)
+                top += 342
+                for name, flt in extra:
+                    explorer(name, [_metric(flt, "table")], "TABLE", ["DEFAULT"], top, 0, W, 266)
+                    top += 266
 
         top = header("REFERENCE  |  every process OneAgent identified, any version", top)
-        rw = W // 2 if len(used) > 1 else W
+        per_row, widths = _grid(len(used), W)
         for i, tech in enumerate(used):
-            if i and i % 2 == 0:
+            if i and i % per_row == 0:
                 top += 342
+            col = i % per_row
             explorer("All %s processes (reference)" % tech, [_metric(sels[tech]["all"], "table")], "TABLE", ["DEFAULT"],
-                     top, (i % 2) * rw, rw, 342)
+                     top, sum(widths[:col]), widths[col], 342)
         top += 342
 
     # ---- reference material at the bottom: the terms used and the CVEs evaluated
@@ -1013,7 +1148,8 @@ def build_dashboard(base, rows, total_scanned, args):
 
 
 
-CSV_COLS = ["technology", "version", "status", "process", "host", "listen_ports", "pgi_id", "pg_id", "host_id", "edition", "os"]
+CSV_COLS = ["technology", "version", "status", "process", "host", "listen_ports", "pgi_id", "pg_id", "host_id", "edition", "os",
+            "cves"]
 CSV_STATUS = {EOL: "EOL-AFFECTED"}  # CSV uses EOL-AFFECTED where the dashboard says VULNERABLE_EOL
 
 
@@ -1022,7 +1158,9 @@ def write_csv(path, rows):
     out = [{"technology": r["tech_type"], "version": "" if r["version"] == "n/a" else r["version"],
             "status": CSV_STATUS.get(r["status"], r["status"]), "process": r["name"], "host": r["host"],
             "listen_ports": r["ports"], "pgi_id": r["id"], "pg_id": r["pg_id"], "host_id": r["host_id"],
-            "edition": r["edition"], "os": r["os"]} for r in rows]
+            "edition": r["edition"], "os": r["os"],
+            "cves": " ".join(TECH_CVES.get(r["tech_type"], [])) if r["status"] in (VULN, EOL, UNKNOWN) else ""}
+           for r in rows]
     out.sort(key=lambda r: (r["technology"] != "PHP", r["technology"], r["status"], r["version"], r["host"]))  # PHP2Shell (critical) first
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLS)
@@ -1034,7 +1172,7 @@ def main():
     p = argparse.ArgumentParser(
         prog="php2shell_dashboard.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Find the PHP, Node.js, .NET and Python processes that OneAgent monitors and that are exposed to the\n"
+        description="Find the PHP, Node.js, .NET, Python and Java processes that OneAgent monitors and that are exposed to the\n"
                     "October 2026 vulnerabilities, write a CSV of them and create a classic Dynatrace dashboard.",
         epilog="""examples:
   Interactive (prompts for the URL and a hidden token):
@@ -1063,8 +1201,8 @@ or to use --validate. On Windows use "py -3" instead of "python3". Full document
                         "SaaS: https://<id>.live.dynatrace.com   (env DT_URL)")
     g_conn.add_argument("--token", default=os.environ.get("DT_API_TOKEN") or os.environ.get("DT_TOKEN"),
                    help="API token (env DT_API_TOKEN or DT_TOKEN, or hidden prompt)")
-    g_what.add_argument("--tech", default="php,node,dotnet,python",
-                   help="technologies to check: any of php, node, dotnet, python, comma separated (default all four)")
+    g_what.add_argument("--tech", default="php,node,dotnet,python,java",
+                   help="technologies to check: any of php, node, dotnet, python, java, comma separated (default all five)")
     g_what.add_argument("--no-kev", action="store_true",
                    help="do not read the CISA KEV feed (use the built-in snapshot; for networks without internet access)")
     g_what.add_argument("--from", "--timeframe", dest="frm", default="now-24h",
@@ -1108,7 +1246,7 @@ or to use --validate. On Windows use "py -3" instead of "python3". Full document
 
     args.techs = [t.strip().lower() for t in args.tech.split(",") if t.strip()]
     if not args.techs or any(t not in TECHS for t in args.techs):
-        sys.exit("--tech must be one or more of: php, node, dotnet, python")
+        sys.exit("--tech must be one or more of: php, node, dotnet, python, java")
     if not args.name:
         args.name = DASHBOARD_NAME if set(args.techs) == set(TECHS) else \
             ("PHP2Shell - CVE-2026-109618 / CVE-2026-109619 exposure" if args.techs == ["php"]
@@ -1153,6 +1291,9 @@ or to use --validate. On Windows use "py -3" instead of "python3". Full document
         c = Counter(r["status"] for r in rows if r["tech"] == t)
         print("%s: %d processes | %s" % (t, sum(c.values()), " | ".join("%s %d" % kv for kv in sorted(c.items()))))
     print("Reminder: version-only check. Verify distro backports (rpm -q php / dpkg -l php*) before closing a finding.")
+    if any(r["tech"] == "Java" for r in rows):
+        print("Java (CVE-2026-114820): RHEL / Debian / Ubuntu OpenJDK packages use the OS trust store; there the fix is "
+              "the ca-certificates update, which the Java version does not show.")
 
     if args.validate:
         try:
